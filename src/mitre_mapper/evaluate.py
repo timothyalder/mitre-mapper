@@ -38,6 +38,7 @@ from mitre_mapper.holdout import get_holdout
 from mitre_mapper.intake import IntakeError, parse_intake
 from mitre_mapper.models import IntakeSpec, MappingProposal, Review, RunRecord, TechniqueMapping
 from mitre_mapper.runlog import RunLog
+from mitre_mapper.report import UNSCORED_STATES
 from mitre_mapper.session import EvalScorer, ScoringInput
 from mitre_mapper.store import DomainStore, get_store
 
@@ -447,6 +448,7 @@ def score_run(
         "attack_id": case.attack_id,
         "intake_status": case.intake_status,
         "terminal_state": state,
+        "scored": True,
         "n_gold": len(gold.techniques),
         "n_pred": len(set(predicted_techniques)),
         "technique": tech,
@@ -500,6 +502,14 @@ def make_scorer(
     """Build the ``eval_scorer`` hook ``run.map_software`` calls just before finalizing."""
 
     def scorer(log: RunLog, inp: ScoringInput) -> dict[str, Any]:
+        if inp.state in UNSCORED_STATES:
+            # the mapper never got to answer: record why instead of scoring an empty mapping as 0
+            scores = {
+                "case": case.case_name, "attack_id": case.attack_id, "intake_status": case.intake_status,
+                "terminal_state": inp.state, "scored": False, "reason": inp.state, "error": inp.error,
+            }
+            log.write_artifact("scores.json", scores)
+            return scores
         outcome = inp.outcome
         minted = outcome is not None and outcome.state == "minted" and inp.state == "minted"
         tids, gids = predicted_from_mapping(outcome.techniques, outcome.groups) if minted and outcome else ([], [])
@@ -861,6 +871,9 @@ def render_case(res: CaseResult) -> str:
         lines.append("  " + w)
     if not s:
         lines.append("  no scores (run did not reach the scorer)")
+        return "\n".join(lines)
+    if s.get("scored") is False:
+        lines.append(f"  not scored: {s['reason']} ({s.get('error') or 'no message'})")
         return "\n".join(lines)
     t = s["technique"]
     lines.append(f"  terminal state: {s['terminal_state']}   gold {s['n_gold']} / predicted {s['n_pred']}")
