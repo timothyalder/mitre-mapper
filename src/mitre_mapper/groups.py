@@ -33,6 +33,29 @@ def normalize_text(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
+_ELISION = re.compile(r"\.\.\.|…")
+_NOT_ALNUM = re.compile(r"[\W_]+")
+
+
+def quote_key(text: str) -> str:
+    """Character sequence used to test whether a quote appears verbatim in evidence (E011, E012).
+
+    Extracted text (PDFs especially) breaks words across lines, with a hyphen
+    ("compro-\\nmise") or without one ("C\\nall logs" in pypdf bullet lists), and keeps
+    list bullets. So "verbatim" means the same letters and digits in the same order:
+    case, whitespace, punctuation and bullets are ignored. An elision ("..." or "…")
+    never matches, since it marks text the quote left out.
+    """
+    text = unicodedata.normalize("NFKC", text).casefold()
+    return "\x00".join(_NOT_ALNUM.sub("", part) for part in _ELISION.split(text))
+
+
+def quote_in(quote: str, evidence_key: str) -> bool:
+    """True if ``quote`` appears verbatim in evidence already reduced with :func:`quote_key`."""
+    key = quote_key(quote)
+    return bool(key.strip("\x00")) and key in evidence_key
+
+
 def _matched(names: list[str], haystack: str) -> list[str]:
     """Names occurring in ``haystack`` as whole words (both already normalised)."""
     out = []
@@ -80,7 +103,7 @@ def check_group_quote(
     if not quote:
         base.reason = "empty quote"
         return base
-    if quote not in normalize_text(evidence[mapping.source_name]):
+    if not quote_in(mapping.quote, quote_key(evidence[mapping.source_name])):
         base.reason = f"quote does not appear verbatim in evidence {mapping.source_name!r}"
         return base
     base.software_aliases_matched = _matched([spec.name, *spec.aliases], quote)
