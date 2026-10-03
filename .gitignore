@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# ATT&CK bundles: pinned in datasets/MANIFEST.json, fetched, never committed
+datasets/*-attack.json
+
+# Fetch cache
+.cache/
+
+# Runs: commit only the index, per-run summaries and reviews (PLAN.md §3.9)
+runs/*/*
+!runs/*/run.md
+!runs/*/review.json

@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "attack_release": "19.2",
+  "release_index_url": "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/index.json",
+  "domains": {
+    "enterprise-attack": {
+      "attack_release": "19.2",
+      "source_url": "https://raw.githubusercontent.com/mitre/cti/ATT%26CK-v19.2/enterprise-attack/enterprise-attack.json",
+      "sha256": "f7eaf37fe53b50404084fe1fe67237278f7317e61c11ad550295722d13ede259",
+      "spec_version": "2.0",
+      "fetched_at": "2026-09-29T00:00:00.000Z",
+      "n_objects": 26085
+    },
+    "mobile-attack": {
+      "attack_release": "19.2",
+      "source_url": "https://raw.githubusercontent.com/mitre/cti/ATT%26CK-v19.2/mobile-attack/mobile-attack.json",
+      "sha256": "e69c3886a3c55311f3f08fac2543bf4ee9647dba7106878274b4cc288e2051f8",
+      "spec_version": "2.0",
+      "fetched_at": "2026-09-29T00:00:00.000Z",
+      "n_objects": 2634
+    },
+    "ics-attack": {
+      "attack_release": "19.2",
+      "source_url": "https://raw.githubusercontent.com/mitre/cti/ATT%26CK-v19.2/ics-attack/ics-attack.json",
+      "sha256": "8a462b5d0103fba3eb941575bd15f3f7968c1362ac724cb03909415bdd5377c1",
+      "spec_version": "2.0",
+      "fetched_at": "2026-09-29T00:00:00.000Z",
+      "n_objects": 2172
+    }
+  }
+}
