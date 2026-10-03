@@ -172,3 +172,19 @@ def test_cli_report_json_and_since(runs: Path) -> None:
     res = runner.invoke(app, ["report", "--since", "2026-01-03", "--runs-dir", str(runs)])
     assert res.exit_code == 0 and "runs: 1" in res.output
     assert runner.invoke(app, ["report", "--since", "bogus", "--runs-dir", str(runs)]).exit_code == 2
+
+
+def test_unscored_eval_runs_do_not_drag_cohort_means(tmp_path):
+    # Issue #2: provider_error rows (old ones recorded zeros without a `scored` flag) are skipped.
+    from mitre_mapper.report import build_report
+
+    P, G = "p" * 64, "g" * 40
+    rows = [
+        _rec(1, "minted", P, G, eval_case="c1", eval_scores={"scored": True, "technique": {"exact": {"f1": 0.6}}}),
+        _rec(2, "provider_error", P, G, eval_case="c1", eval_scores={"technique": {"exact": {"f1": 0}}}),  # legacy zero
+        _rec(3, "provider_error", P, G, eval_case="c1",
+             eval_scores={"scored": False, "reason": "provider_error", "error": "limit"}),
+    ]
+    m = build_report(rows, lambda run_id: [])["cohorts"][0]["metrics"]
+    assert m["eval.c1.technique.exact.f1"] == 0.6
+    assert m["eval.c1.n_scored"] == 1 and m["eval.c1.n_unscored"] == 2

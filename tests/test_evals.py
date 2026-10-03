@@ -688,3 +688,21 @@ def test_cli_freeze_and_eval_roundtrip_with_a_fake_model(tmp_path, monkeypatch):
     assert "baseline model-only: " in out.output  # a bare string model name cannot be initialised: recorded, not fatal
     rows = read_index(tmp_path / "runs")
     assert rows[-1].eval_case == "roundtrip" and rows[-1].eval_scores["technique"]["exact"]["recall"] == 0.2
+
+
+def test_a_provider_error_eval_run_is_unscored_not_zero(tmp_path, pegasus_case):
+    # Issue #2: an outage measures availability, not mapping quality.
+    from mitre_mapper.runlog import ProviderError
+
+    res = run(pegasus_case, tmp_path, ScriptedChatModel(script=[ProviderError("session limit")]))
+    assert res.record.terminal_state == "provider_error"
+    s = res.scores
+    assert s["scored"] is False and s["reason"] == "provider_error" and "session limit" in s["error"]
+    assert "technique" not in s and s["case"] == pegasus_case.case_name
+    assert json.loads((res.run_dir / "scores.json").read_text()) == s == res.record.eval_scores
+    assert "not scored" in ev.render_case(res)
+
+
+def test_minted_eval_scores_are_marked_scored(tmp_path, pegasus_case):
+    res = run(pegasus_case, tmp_path, ScriptedChatModel(script=[proposal_msg(mobile_proposal())]))
+    assert res.scores["scored"] is True

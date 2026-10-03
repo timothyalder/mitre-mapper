@@ -44,7 +44,9 @@ JSON schema (``schema_version`` 1; keys are stable, additions only)::
         metrics: minted_rate, terminal_ok_rate (minted|declined), lint_error_run_share,
         mean_attempts, mean_model_calls, mean_wall_s, zero_hit_per_run, fetch_failures_per_run,
         unmatched_actors_per_run, judge_fail_runs_share, review_precision, review_recall,
-        and ``eval.<case>.<numeric score key>`` = mean over that cohort's eval runs.
+        and ``eval.<case>.<numeric score key>`` = mean over that cohort's SCORED eval runs
+        (``eval.<case>.n_scored`` / ``n_unscored``; runs ending provider_error/error/abandoned are
+        unscored: an outage, not a mapping-quality result).
         ``prompt_sha256``/``git_sha`` are 12-char prefixes (``-dirty`` kept on git_sha).
     cohort_comparison: [{from: {prompt_sha256, git_sha}, to: {...}, diff: {metric: to - from}}]
                                              # consecutive cohorts, only metrics present in both;
@@ -64,6 +66,18 @@ from pathlib import Path
 from typing import Any
 
 from mitre_mapper.models import RunRecord
+
+# Terminal states where the mapper never got to answer (infrastructure, not quality): an eval run
+# ending in one is recorded unscored and kept out of cohort means. budget_exhausted stays scored,
+# since running out of budget is mapper behaviour.
+UNSCORED_STATES = frozenset({"provider_error", "error", "abandoned"})
+
+
+def is_scored(eval_scores: Mapping[str, Any] | None, terminal_state: str) -> bool:
+    """Whether a row's eval scores count. Rows from before the ``scored`` flag are judged by state."""
+    if eval_scores is None:
+        return False
+    return bool(eval_scores.get("scored", terminal_state not in UNSCORED_STATES))
 
 __all__ = [
     "EXAMPLE_CAP",
@@ -620,12 +634,23 @@ def _cohorts(rows: Sequence[RunRecord], lint_err: Mapping[str, bool]) -> list[di
         m["review_precision"] = rv["precision"]
         m["review_recall"] = rv["recall"]
         by_key: dict[str, list[float]] = defaultdict(list)
+        n_scored: Counter[str] = Counter()
+        n_unscored: Counter[str] = Counter()
         for r in rs:
-            if r.eval_scores is not None:
-                for key, val in _flat_numeric(r.eval_scores).items():
-                    by_key[f"eval.{r.eval_case or 'unknown'}.{key}"].append(val)
+            if r.eval_scores is None:
+                continue
+            case = r.eval_case or "unknown"
+            if not is_scored(r.eval_scores, r.terminal_state):  # outage, not quality: keep out of means
+                n_unscored[case] += 1
+                continue
+            n_scored[case] += 1
+            for key, val in _flat_numeric(r.eval_scores).items():
+                by_key[f"eval.{case}.{key}"].append(val)
         for key in sorted(by_key):
             m[key] = _mean(by_key[key])
+        for case in sorted(set(n_scored) | set(n_unscored)):
+            m[f"eval.{case}.n_scored"] = n_scored[case]
+            m[f"eval.{case}.n_unscored"] = n_unscored[case]
         cohorts.append(
             {
                 "prompt_sha256": psha,
