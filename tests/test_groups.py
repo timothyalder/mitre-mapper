@@ -181,3 +181,15 @@ def test_enterprise_vendor_names_pass_quote_check(attack_store):
         )
         assert check.passed, (gid, check.reason)
         assert alias in check.group_aliases_matched
+
+
+def test_group_quote_matches_across_pdf_hyphenation(mobile_store):
+    # Issue #1: E011 shares E012's quote matching.
+    evidence = {"Blog": "the Confucius APT group de-\nployed Pegasus against targets"}
+    check = check_group_quote(mapping("Confucius APT group deployed Pegasus"), spec(), mobile_store, evidence)
+    assert check.passed, check.reason
+
+
+def test_normalize_text_unchanged_for_definition_hashes():
+    # quote matching must not change normalize_text: group definition hashes depend on it
+    assert normalize_text("State-\nSponsored  •  Actor") == "state- sponsored • actor"

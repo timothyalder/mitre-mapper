@@ -673,3 +673,49 @@ def test_e012_exempts_user_asserted_and_checks_every_quote():
     prop = MappingProposal(domain="mobile-attack", techniques=[asserted, two])
     [f] = _e012(prop, {"Lookout Pegasus": REPORT_TEXT})
     assert f.details["quote_prefix"] == "invented sentence"
+
+
+# Issue #1: PDF extraction artefacts (real lines from the Lookout Pegasus report).
+LOOKOUT_PDF = (
+    "1. CVE-2016-4657: Memory Corruption in WebKit - A vulnerability in Safari WebKit allows the attacker to compro-\n"
+    "mise the device when the user clicks on a link. \n"
+    "above, it also spies on: \n• Phone calls\n• Call logs\n• SMS messages the victim sends or receives\n"
+    "This attack is state-\nsponsored and the device has been ex-\nploited.\n"
+)
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "A vulnerability in Safari WebKit allows the attacker to compromise the device when the user clicks on a link.",
+        "it also spies on: Phone calls, Call logs, SMS messages the victim sends or receives",
+        "This attack is state-sponsored and the device has been exploited.",
+    ],
+)
+def test_e012_accepts_quotes_across_pdf_hyphenation_and_bullets(quote):
+    prop = MappingProposal(domain="mobile-attack", techniques=[_tech("T1456", "Lookout-Pegasus", quote)])
+    assert _e012(prop, {"Lookout-Pegasus": LOOKOUT_PDF}) == []
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "the attacker to compromise the phone when the user clicks",  # changed word
+        "it also spies on: Phone calls ... SMS messages",  # elision is not verbatim
+        "it also spies on: Phone calls … SMS messages",
+        "Stage 3: This stage is downloaded by stage 2",  # real paraphrase from run 74ff83
+    ],
+)
+def test_e012_still_rejects_non_verbatim_quotes_in_pdf_text(quote):
+    prop = MappingProposal(domain="mobile-attack", techniques=[_tech("T1456", "Lookout-Pegasus", quote)])
+    [f] = _e012(prop, {"Lookout-Pegasus": LOOKOUT_PDF})
+    assert f.details["reason"] == "quote_not_found"
+
+
+def test_e012_accepts_words_split_without_hyphen_in_pdf_bullets():
+    # pypdf splits a word's first letter onto its own line inside bullet lists (no hyphen);
+    # verbatim lines 175-180 of the Lookout Pegasus extraction (run 20261003T162828Z-...-57858e)
+    text = "above, it also spies on: \n• Phone calls\n• C\nall logs\n• SMS messages the victim sends or r\neceives\n"
+    quote = "it also spies on: Phone calls, Call logs, SMS messages the victim sends or receives"
+    prop = MappingProposal(domain="mobile-attack", techniques=[_tech("T1636.002", "Lookout-Pegasus", quote)])
+    assert _e012(prop, {"Lookout-Pegasus": text}) == []

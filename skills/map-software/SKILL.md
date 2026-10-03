@@ -51,9 +51,9 @@ supported beats a long one.
    name, or call `get_technique` on `<parent>.001`, `.002`, and so on. Use the parent only when the
    evidence does not say which variant. Don't propose a parent together with its own sub-technique
    unless the evidence describes behaviour that no sub-technique covers.
-7. **Cite.** Each quote is one contiguous span copied from a source you read. Case, whitespace and
-   curly quotes may differ from the source, nothing else may: no paraphrase, no `...`, no stitched
-   fragments. If you cannot quote support for a technique, drop it.
+7. **Cite.** Each quote is one contiguous span copied from a source you read. Case, whitespace,
+   punctuation and words broken across lines may differ from the source; the words may not: no
+   paraphrase, no `...`, no stitched fragments. If you cannot quote support for a technique, drop it.
 8. **Groups.** Follow the Groups rules below.
 9. **Submit** the proposal. In the LangChain agent, finish by calling the `MappingProposal` tool.
    In Claude Code, call `submit_proposal`.

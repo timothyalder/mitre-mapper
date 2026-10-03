@@ -508,7 +508,7 @@ def _e011(ctx: LintContext) -> list[LintFinding]:
 def _e012(ctx: LintContext) -> list[LintFinding]:
     """Agent-proposed technique evidence quotes appear verbatim in the named source's text."""
     rule, findings = RULES["E012"], []
-    from .groups import normalize_text
+    from .groups import quote_in, quote_key
     from .intake import INTAKE_PROSE_SOURCE
 
     texts = dict(ctx.evidence)
@@ -522,9 +522,8 @@ def _e012(ctx: LintContext) -> list[LintFinding]:
             if ev.source_name not in texts:
                 reason = "source_missing"
             else:
-                haystack = normalized.setdefault(ev.source_name, normalize_text(texts[ev.source_name]))
-                quote = normalize_text(ev.quote)
-                reason = None if quote and quote in haystack else "quote_not_found"
+                haystack = normalized.setdefault(ev.source_name, quote_key(texts[ev.source_name]))
+                reason = None if quote_in(ev.quote, haystack) else "quote_not_found"
             if reason is None:
                 continue
             prefix = " ".join(ev.quote.split())[:60]
