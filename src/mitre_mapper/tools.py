@@ -11,6 +11,12 @@ event (``call_id``, ``sha256``, ``ok``); search tools also emit ``search``
 
 Tools never raise into the agent: any failure becomes ``{"error": "..."}``.
 No LangChain imports here (acceptance criterion 13).
+
+Session-level tools (``submit_proposal``, ``mint_delta``, ``end_run``) are the MCP-only
+surface: they need ``ToolContext.session`` (a :class:`mitre_mapper.session.Session`) and
+delegate to it, so the logic lives in the core ``session`` module. A tool body that must close
+the run sets ``call.finalize``; the wrapper logs the ``tool_call`` event FIRST and then
+finalizes, so ``run_end`` is always the last event.
 """
 
 from __future__ import annotations
@@ -52,6 +58,8 @@ class ToolContext:
     # ATT&CK ids returned by searches since the last reset (run.py resets per attempt
     # to compute ``rejected_candidates``).
     returned_ids: list[str] = field(default_factory=list)
+    # MCP only: the owning session (None for LangChain-driven runs).
+    session: Any = None
 
     @property
     def domain_store(self) -> DomainStore:
@@ -64,6 +72,8 @@ class _Call:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, Any]]] = []
         self.summary: dict[str, Any] = {}
+        self.args: dict[str, Any] | None = None  # compact args for the tool_call event (full args stay in calls/<n>.json)
+        self.finalize: tuple[str, str | None] | None = None  # (terminal_state, error): close the run after logging
 
     def emit(self, name: str, **fields: Any) -> None:
         self.events.append((name, fields))
@@ -87,12 +97,19 @@ def _logged(
             call_id, digest = ctx.log.write_call(tool, {"args": args, "result": result})
             extra = {"summary": call.summary} if call.summary else {}
             ctx.log.event(
-                "tool_call", tool=tool, args=args, call_id=call_id, sha256=digest, ok=ok, **extra
+                "tool_call", tool=tool, args=call.args if call.args is not None else args,
+                call_id=call_id, sha256=digest, ok=ok, **extra,
             )
             for name, fields in call.events:
                 ctx.log.event(name, call_id=call_id, **fields)
         except Exception as exc:  # noqa: BLE001 - logging failure must not kill the agent
             result = {**result, "log_error": f"{type(exc).__name__}: {exc}"}
+        if call.finalize is not None:
+            state, error = call.finalize
+            try:
+                ctx.log.finalize(state, error=error)
+            except Exception as exc:  # noqa: BLE001
+                result = {**result, "log_error": f"finalize failed: {type(exc).__name__}: {exc}"}
         return result
 
     return wrapper
@@ -336,8 +353,46 @@ def lint_proposal(ctx: ToolContext, call: _Call, proposal: dict[str, Any]) -> di
     }
 
 
-# ``mint_delta`` (refuses on any ERROR, closes the MCP run) arrives with the MCP
-# server in Wave 4B; run.py owns committing mints in the map flow.
+# --------------------------------------------------------------------------- session tools (MCP)
+
+
+def _session(ctx: ToolContext) -> Any:
+    if ctx.session is None:
+        raise RuntimeError("this tool needs an MCP session (ToolContext.session is None)")
+    return ctx.session
+
+
+@_logged
+def submit_proposal(ctx: ToolContext, call: _Call, proposal: dict[str, Any]) -> dict[str, Any]:
+    """Submit a MappingProposal for ``ctx.domain``: counts an attempt, logs and lints it.
+
+    Out of attempts with ERRORs closes the run as ``lint_failed``.
+    """
+    call.args = {
+        "domain": ctx.domain,
+        "n_techniques": len(proposal.get("techniques") or []),
+        "n_groups": len(proposal.get("groups") or []),
+        "declined": bool(proposal.get("declined")),
+    }
+    result, call.finalize = _session(ctx).submit(ctx.domain, proposal)
+    return result
+
+
+@_logged
+def mint_delta(ctx: ToolContext, call: _Call) -> dict[str, Any]:
+    """Merge user-asserted items, final-lint, mint and write delta.json; REFUSES on any ERROR."""
+    result, call.finalize = _session(ctx).mint()
+    return result
+
+
+@_logged
+def end_run(
+    ctx: ToolContext, call: _Call, reason: str, terminal_state: str = "declined"
+) -> dict[str, Any]:
+    """Close the run without minting (``declined`` or ``error``); ``reason`` is logged."""
+    result, call.finalize = _session(ctx).end(reason, terminal_state)
+    return result
+
 
 TOOL_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     f.__name__: f
@@ -352,5 +407,8 @@ TOOL_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
         get_evidence,
         read_reference,
         lint_proposal,
+        submit_proposal,
+        mint_delta,
+        end_run,
     )
 }

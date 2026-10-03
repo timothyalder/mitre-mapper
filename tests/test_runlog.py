@@ -373,3 +373,17 @@ def test_run_md_without_mint_has_no_mapping_section(tmp_path):
     log.finalize("declined")
     md = (log.run_dir / "run.md").read_text()
     assert "## Mapping" not in md and "## Attempts" not in md
+
+
+def test_surface_recorded_and_close_abandoned_filters(tmp_path: Path) -> None:
+    lc = RunLog.start(tmp_path, **kwargs())
+    mcp = RunLog.start(tmp_path, surface="mcp", **kwargs())
+    mine = RunLog.start(tmp_path, surface="mcp", **kwargs())
+    assert lc.header["surface"] == "langchain" and mcp.header["surface"] == "mcp"
+    assert close_abandoned(tmp_path, surface="mcp", exclude={mine.run_id}) == [mcp.run_id]
+    assert close_abandoned(tmp_path, min_idle_s=3600) == []  # recent activity is never closed
+    rows = {r.run_id: r for r in read_index(tmp_path)}
+    assert set(rows) == {mcp.run_id} and rows[mcp.run_id].surface == "mcp"
+    assert RunLog.open(lc.run_dir).header["surface"] == "langchain"
+    lc.finalize("error")
+    assert {r.run_id: r.surface for r in read_index(tmp_path)}[lc.run_id] == "langchain"

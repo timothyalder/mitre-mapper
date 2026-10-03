@@ -173,5 +173,115 @@ def report_cmd(
         typer.echo(f"  - {r.run_id}  {r.software_name}  {r.terminal_state}")
 
 
+datasets_app = typer.Typer(no_args_is_help=True, help="Pinned ATT&CK datasets.")
+delta_app = typer.Typer(no_args_is_help=True, help="Inspect deltas.")
+app.add_typer(datasets_app, name="datasets")
+app.add_typer(delta_app, name="delta")
+
+
+@datasets_app.command("status")
+def datasets_status_cmd(
+    datasets_dir: Annotated[Path, typer.Option()] = Path("datasets"),
+) -> None:
+    """Manifest vs files on disk (existence, sha256, object count)."""
+    from mitre_mapper import datasets
+
+    bad = False
+    release = datasets.read_manifest(datasets_dir)["attack_release"]
+    typer.echo(f"pinned ATT&CK release: {release}")
+    for st in datasets.status(datasets_dir):
+        typer.echo(f"  {st.domain}: {st.release} {'ok' if st.ok else 'PROBLEM: ' + '; '.join(st.problems)}")
+        bad |= not st.ok
+    if bad:
+        raise typer.Exit(1)
+
+
+@datasets_app.command("update")
+def datasets_update_cmd(
+    to: Annotated[str | None, typer.Option("--to", help="Target release (default: newest upstream).")] = None,
+    force: Annotated[bool, typer.Option("--force", help="Re-download even if already on that release.")] = False,
+    no_diff: Annotated[bool, typer.Option("--no-diff", help="Skip diff_stix (slow: ~40 s for enterprise).")] = False,
+    datasets_dir: Annotated[Path, typer.Option()] = Path("datasets"),
+    runs_dir: Annotated[Path, typer.Option()] = Path("runs"),
+) -> None:
+    """Download a release, write a diff_stix changelog, swap files, update MANIFEST, run delta doctor."""
+    from mitre_mapper import datasets
+
+    try:
+        res = datasets.update(datasets_dir, to, run_diff=not no_diff, force=force, runs_dir=runs_dir)
+    except datasets.DatasetError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    if res.noop:
+        typer.echo(f"already on {res.to_release}; nothing to do (use --force to re-download)")
+        return
+    typer.echo(f"updated {res.from_release} -> {res.to_release}: {', '.join(res.updated_domains)}")
+    for kind, path in res.changelog.items():
+        typer.echo(f"changelog {kind}: {path}")
+    typer.echo(f"delta doctor: {len(res.doctor)} delta(s), {'clean' if res.doctor_ok else 'PROBLEMS'}")
+    for rep in res.doctor:
+        for f in rep.findings:
+            typer.echo(f"  {rep.run_id} {f.code} {f.severity}: {f.message}")
+    if not res.doctor_ok:
+        raise typer.Exit(1)
+
+
+@app.command("materialize")
+def materialize_cmd(
+    run_ids: Annotated[list[str], typer.Argument(help="Run ids whose delta.json to combine.")],
+    domain: Annotated[list[str] | None, typer.Option("--domain", help="Only this domain (repeatable).")] = None,
+    out: Annotated[Path, typer.Option("--out", help="Output dir for patched bundles.")] = Path(".cache/materialized"),
+    runs_dir: Annotated[Path, typer.Option()] = Path("runs"),
+    datasets_dir: Annotated[Path, typer.Option()] = Path("datasets"),
+) -> None:
+    """Combine deltas into patched bundles and verify them through MitreAttackData."""
+    from mitre_mapper import delta
+
+    try:
+        written = delta.materialize(
+            [Path(runs_dir) / r for r in run_ids], domains=domain, out_dir=out, datasets_dir=datasets_dir
+        )
+    except delta.DeltaError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    for dom, path in written.items():
+        typer.echo(f"{dom}: {path}")
+
+
+@delta_app.command("doctor")
+def delta_doctor_cmd(
+    run_id: Annotated[str | None, typer.Argument(help="Run id (omit with --all).")] = None,
+    all_runs: Annotated[bool, typer.Option("--all", help="Every runs/*/delta.json.")] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+    runs_dir: Annotated[Path, typer.Option()] = Path("runs"),
+    datasets_dir: Annotated[Path, typer.Option()] = Path("datasets"),
+) -> None:
+    """Check deltas against the current datasets, allocations and upstream software/groups."""
+    from mitre_mapper import delta
+
+    if bool(run_id) == all_runs:
+        typer.echo("error: give exactly one of RUN_ID or --all", err=True)
+        raise typer.Exit(2)
+    try:
+        reports = (
+            delta.doctor_all(runs_dir, datasets_dir)
+            if all_runs
+            else [delta.doctor(Path(runs_dir) / str(run_id), datasets_dir)]
+        )
+    except delta.DeltaError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    if as_json:
+        typer.echo(json.dumps([r.model_dump() for r in reports], indent=2))
+    else:
+        typer.echo(f"{len(reports)} delta(s) checked")
+        for rep in reports:
+            typer.echo(f"{rep.run_id}: {'ok' if rep.ok else 'PROBLEMS'}{' (retire recommended)' if rep.retire else ''}")
+            for f in rep.findings:
+                typer.echo(f"  {f.code} {f.severity}: {f.message}")
+    if not all(r.ok for r in reports):
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()

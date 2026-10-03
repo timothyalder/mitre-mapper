@@ -17,68 +17,43 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import frontmatter
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from mitre_mapper.agent import AgentOutputError, build_agent, invoke_agent
 from mitre_mapper.allocations import Allocations
-from mitre_mapper.fetch import gather_evidence
-from mitre_mapper.groups import check_group_quote
 from mitre_mapper.intake import IntakeError, parse_intake, resolve_domains
 from mitre_mapper.judge import JudgeOutputError, JudgeResult, judge
-from mitre_mapper.lint import has_errors
-from mitre_mapper.mint import MintResult, build_objects
 from mitre_mapper.models import (
-    Delta,
-    ExternalReference,
-    GroupMapping,
     IntakeSpec,
     LintFinding,
     MappingProposal,
     RubricItem,
     RunRecord,
     Severity,
-    TechniqueMapping,
     Verdict,
 )
 from mitre_mapper.runlog import Budget, BudgetExhausted, ProviderError, RunLog, run_context
+from mitre_mapper.session import (  # the shared core (also driven by the MCP server)
+    DEFAULT_CACHE_DIR,
+    DEFAULT_SKILL_PATH,
+    LINT_FAILED_ATTEMPTS,
+    complete_mapping,
+    gather_intake_evidence,
+    load_system_prompt,
+    log_no_structured_output,
+    log_unmatched_actors,
+    process_proposal,
+)
 from mitre_mapper.store import AttackStore, get_store
-from mitre_mapper.tools import REPO_ROOT, ToolContext, now_stix, preview_lint
+from mitre_mapper.tools import ToolContext, now_stix
 
-DEFAULT_SKILL_PATH = REPO_ROOT / "skills" / "map-software" / "SKILL.md"
-INTAKE_SOURCE = "mitre-mapper intake"
-DEFAULT_CACHE_DIR = REPO_ROOT / ".cache" / "fetch"
 JUDGE_OUTPUT_INVALID = "judge_output_invalid"
-
-
-def load_system_prompt(skill_path: Path = DEFAULT_SKILL_PATH) -> str:
-    """The SKILL.md body (frontmatter stripped) is the system prompt."""
-    return frontmatter.loads(skill_path.read_text(encoding="utf-8")).content.strip()
 
 
 def _model_name(model: str | BaseChatModel) -> str:
     if isinstance(model, str):
         return model
     return str(getattr(model, "model_name", None) or type(model).__name__)
-
-
-def _ids(proposal: MappingProposal) -> tuple[set[str], set[str]]:
-    return {t.technique_id for t in proposal.techniques}, {g.group_id for g in proposal.groups}
-
-
-def _force_agent_items_unasserted(proposal: MappingProposal, domain: str) -> MappingProposal:
-    """SECURITY: only intake-derived items may carry ``user_asserted`` (they skip the judge).
-
-    An agent that marks its own items would bypass review, so every agent-proposed
-    item is forced to ``user_asserted=False``. The domain is also pinned.
-    """
-    return proposal.model_copy(
-        update={
-            "domain": domain,
-            "techniques": [t.model_copy(update={"user_asserted": False}) for t in proposal.techniques],
-            "groups": [g.model_copy(update={"user_asserted": False}) for g in proposal.groups],
-        }
-    )
 
 
 def render_feedback(findings: Sequence[LintFinding]) -> str:
@@ -124,48 +99,6 @@ def _first_message(spec: IntakeSpec, domain: str, evidence: dict[str, str], feed
     if feedback:
         parts.append(feedback)
     return "\n\n".join(parts)
-
-
-def _write_lint(log: RunLog, domain: str, name: str, findings: Sequence[LintFinding]) -> None:
-    log.write_artifact(f"{domain}/{name}.json", [f.model_dump(mode="json") for f in findings])
-
-
-def _user_asserted_items(
-    spec: IntakeSpec, domains: list[str], store: AttackStore, intake_ref_name: str
-) -> dict[str, tuple[list[TechniqueMapping], list[GroupMapping]]]:
-    """Intake-pinned techniques/groups, routed to the domain that owns them."""
-    out: dict[str, tuple[list[TechniqueMapping], list[GroupMapping]]] = {d: ([], []) for d in domains}
-
-    def owner(attack_id: str, stix_type: str) -> str:
-        for d in domains:
-            if store.domain(d).lookup(attack_id, stix_type).obj is not None:
-                return d
-        return domains[0]  # unresolvable: lands in the first domain so lint E002 reports it
-
-    for tid in spec.techniques:
-        out[owner(tid, "attack-pattern")][0].append(
-            TechniqueMapping(
-                technique_id=tid, rationale="Asserted by the user in the intake file.", user_asserted=True
-            )
-        )
-    for g in spec.groups:
-        if g.ref:
-            out[owner(g.ref, "intrusion-set")][1].append(
-                GroupMapping(
-                    group_id=g.ref,
-                    quote="Asserted by the user in the intake file.",
-                    source_name=intake_ref_name,
-                    user_asserted=True,
-                )
-            )
-    return out
-
-
-def _dataset_manifest(datasets_dir: Path) -> dict[str, Any]:
-    try:
-        return json.loads((datasets_dir / "MANIFEST.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
 
 
 def _run_judge(
@@ -243,62 +176,20 @@ def _attempt_domain(
         try:
             raw = invoke_agent(agent, [{"role": "user", "content": _first_message(spec, domain, evidence, feedback)}])
         except AgentOutputError as exc:
-            log.event("retry", domain=domain, attempt=attempt, reason=f"no_structured_output: {exc}", added=[], removed=[])
+            log_no_structured_output(log, domain, attempt, str(exc))
             feedback = "You did not call the MappingProposal tool. Finish by calling it."
             last_failure = "lint_failed"
             continue
-        proposal = _force_agent_items_unasserted(raw, domain)
+        res = process_proposal(
+            ctx, raw, attempt=attempt, prev=prev, retry_reason=retry_reason, created=created
+        )
+        proposal = res.proposal
         last_proposal = proposal
-        log.write_artifact(f"{domain}/proposal_{attempt}.json", proposal)
-        tech_ids, group_ids = _ids(proposal)
-        cited = tech_ids | group_ids
-        log.event(
-            "proposal_draft",
-            domain=domain,
-            attempt=attempt,
-            technique_ids=sorted(tech_ids),
-            group_ids=sorted(group_ids),
-            declined=proposal.declined,
-            rejected_candidates=sorted(set(ctx.returned_ids) - cited),
-        )
-        if prev is not None:
-            p_t, p_g = _ids(prev)
-            log.event(
-                "retry",
-                domain=domain,
-                attempt=attempt,
-                reason=retry_reason,
-                added=sorted((tech_ids | group_ids) - (p_t | p_g)),
-                removed=sorted((p_t | p_g) - (tech_ids | group_ids)),
-            )
-        for gm in proposal.groups:
-            check = check_group_quote(gm, spec, store.domain(domain), evidence)
-            log.event(
-                "group_quote_check",
-                domain=domain,
-                attempt=attempt,
-                group_id=check.group_id,
-                passed=check.passed,
-                reason=check.reason,
-                source=check.source_name,
-                software_aliases_matched=check.software_aliases_matched,
-                group_aliases_matched=check.group_aliases_matched,
-            )
-        findings = preview_lint(spec, proposal, store, allocations, evidence, created)
-        _write_lint(log, domain, f"lint_{attempt}", findings)
-        log.event(
-            "lint_result",
-            domain=domain,
-            attempt=attempt,
-            findings=[f.model_dump(mode="json") for f in findings],
-        )
-        if has_errors(findings):
+        if res.has_errors:
             prev = proposal
-            feedback = render_feedback(findings)
+            feedback = render_feedback(res.findings)
             last_failure = "lint_failed"
-            retry_reason = "lint_errors: " + ",".join(
-                sorted({f.rule_id for f in findings if f.severity == Severity.ERROR})
-            )
+            retry_reason = res.error_reason
             continue
         if judge_model is not None:  # exactly one judge call per lint-clean attempt (D6)
             verdict = _run_judge(
@@ -318,81 +209,6 @@ def _attempt_domain(
                 continue
         return ("declined" if proposal.declined else "accepted"), proposal
     return last_failure, last_proposal
-
-
-def _gather(
-    log: RunLog,
-    spec: IntakeSpec,
-    *,
-    cache_dir: Path,
-    evidence_dir: Path | None,
-    fetch: bool,
-    use_cache: bool,
-    timeout: float,
-) -> dict[str, str]:
-    """Fetch intake + new-group references (never raises); keep only ok text."""
-    refs: dict[str, ExternalReference] = {}
-    for ref in [*spec.references, *(r for g in spec.groups if g.new for r in g.new.references)]:
-        refs.setdefault(ref.source_name, ref)
-    results = gather_evidence(
-        list(refs.values()),
-        log=log,
-        cache_dir=cache_dir,
-        run_evidence_dir=log.run_dir / "evidence",
-        evidence_dir=evidence_dir,
-        fetch=fetch,
-        use_cache=use_cache,
-        timeout=timeout,
-    )
-    return {name: r.text for name, r in results.items() if r.ok and r.text is not None}
-
-
-def _mint_payload(
-    live: dict[str, MappingProposal], result: MintResult, store: AttackStore
-) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
-    """The final mapping for the ``mint`` event: techniques and groups per domain."""
-    techniques: dict[str, list[dict[str, Any]]] = {}
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for domain, proposal in sorted(live.items()):
-        ds = store.domain(domain)
-        techniques[domain] = []
-        for t in proposal.techniques:
-            obj = ds.lookup(t.technique_id, "attack-pattern").obj
-            sources = (
-                [INTAKE_SOURCE]
-                if t.user_asserted
-                else list(dict.fromkeys(e.source_name for e in t.evidence))
-            )
-            techniques[domain].append(
-                {
-                    "id": t.technique_id,
-                    "name": obj.get("name") if obj else None,
-                    "user_asserted": t.user_asserted,
-                    "sources": sources,
-                }
-            )
-        groups[domain] = []
-        for g in proposal.groups:
-            obj = ds.lookup(g.group_id, "intrusion-set").obj
-            groups[domain].append(
-                {
-                    "id": g.group_id,
-                    "name": obj.get("name") if obj else None,
-                    "user_asserted": g.user_asserted,
-                    "kind": "existing",
-                }
-            )
-        for o in result.by_domain.get(domain, []):
-            if o.get("type") == "intrusion-set":
-                groups[domain].append(
-                    {
-                        "id": o["external_references"][0]["external_id"],
-                        "name": o.get("name"),
-                        "user_asserted": True,
-                        "kind": "new",
-                    }
-                )
-    return techniques, groups
 
 
 def map_software(
@@ -450,7 +266,7 @@ def map_software(
 
         domains: list[str] = list(resolve_domains(spec))
         log.event("domain_resolved", domains=domains)
-        evidence = _gather(
+        evidence = gather_intake_evidence(
             log,
             spec,
             cache_dir=Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR,
@@ -482,14 +298,7 @@ def map_software(
             )
             if outcome in ("accepted", "declined") and proposal is not None:
                 accepted[domain] = proposal  # a declined one is kept only if user-asserted items revive it
-                for actor in proposal.unmatched_actors:
-                    log.event(
-                        "unmatched_actor",
-                        domain=domain,
-                        actor=actor.actor,
-                        quote=actor.quote,
-                        source_name=actor.source_name,
-                    )
+                log_unmatched_actors(log, domain, proposal)
             else:
                 failed_state = outcome
                 break
@@ -497,100 +306,17 @@ def map_software(
         if failed_state is not None:
             log.finalize(
                 failed_state,
-                error="attempts exhausted with lint ERRORs"
+                error=LINT_FAILED_ATTEMPTS
                 if failed_state == "lint_failed"
                 else "attempts exhausted; the judge rejected the last lint-clean proposal",
             )
             return _record(runs_dir, log)
 
-        # User-asserted items: always included, flagged, never judged.
-        targets = list(accepted) or domains
-        asserted = _user_asserted_items(spec, targets, store, INTAKE_SOURCE)
-        for domain, (techs, groups) in asserted.items():
-            if not (techs or groups):
-                continue
-            base = accepted.get(domain) or MappingProposal(domain=domain)  # type: ignore[arg-type]
-            accepted[domain] = base.model_copy(
-                update={
-                    "declined": False,
-                    "decline_rationale": None,
-                    "techniques": [*base.techniques, *techs],
-                    "groups": [*base.groups, *groups],
-                }
-            )
-            if techs:
-                log.event(
-                    "user_asserted", kind="intake", domain=domain, techniques=[t.technique_id for t in techs]
-                )
-            for g in groups:
-                log.event("user_asserted", kind="group_ref", domain=domain, group_id=g.group_id)
-        new_groups = [g.new for g in spec.groups if g.new is not None]
-        for new in new_groups:
-            log.event(
-                "user_asserted", kind="new_group", name=new.name, aliases=new.aliases, techniques=new.techniques
-            )
-        if new_groups and all(p.declined for p in accepted.values()):
-            # User-defined groups are content the agent's decline cannot veto: keep one domain
-            # live so they are minted (final lint E001 still applies to the software itself).
-            first = targets[0]
-            base = accepted.get(first) or MappingProposal(domain=first)  # type: ignore[arg-type]
-            accepted[first] = base.model_copy(update={"declined": False, "decline_rationale": None})
-
-        live = {d: p for d, p in accepted.items() if not p.declined}
-        if not live:
-            log.finalize("declined", error=None)
-            return _record(runs_dir, log)
-
-        # Final lint on the merged proposals (includes user-asserted items).
-        final_errors = False
-        for domain, proposal in live.items():
-            findings = preview_lint(spec, proposal, store, allocations, evidence, created)
-            _write_lint(log, domain, "lint_final", findings)
-            log.event(
-                "lint_result",
-                domain=domain,
-                attempt="final",
-                phase="final",
-                findings=[f.model_dump(mode="json") for f in findings],
-            )
-            final_errors = final_errors or has_errors(findings)
-        if final_errors:
-            log.finalize("lint_failed", error="final lint (with user-asserted items) has ERRORs")
-            return _record(runs_dir, log)
-
-        log.event(
-            "merge",
-            kind="cross_domain",
-            domains=sorted(live),
-            n_techniques={d: len(p.techniques) for d, p in live.items()},
-            n_groups={d: len(p.groups) for d, p in live.items()},
+        outcome = complete_mapping(
+            log, spec=spec, store=store, allocations=allocations, evidence=evidence, domains=domains,
+            accepted=accepted, created=created, datasets_dir=datasets_dir,
         )
-        result = build_objects(spec, live, store, allocations, created, commit=True, run_id=log.run_id)
-        names = {o["id"]: o.get("name") for o in result.objects}
-        for attack_id, stix_id in sorted(result.allocations.items()):
-            log.event("allocation", attack_id=attack_id, name=names.get(stix_id), stix_id=stix_id)
-        mint_techniques, mint_groups = _mint_payload(live, result, store)
-        log.event(
-            "mint",
-            software_id=result.software["id"],
-            n_objects=len(result.objects),
-            domains=sorted(live),
-            techniques=mint_techniques,
-            groups=mint_groups,
-        )
-        delta = Delta(
-            run_id=log.run_id,
-            created=created,
-            dataset_manifest=_dataset_manifest(datasets_dir),
-            tool_version=log.header["tool_version"],
-            git_sha=log.header["git_sha"],
-            prompt_sha256=log.header["prompt_sha256"],
-            allocations=result.allocations,
-            target_domains=sorted(live),  # type: ignore[arg-type]
-            objects=result.objects,
-        )
-        log.write_artifact("delta.json", delta)
-        log.finalize("minted")
+        log.finalize(outcome.state, error=outcome.error)
     # Reached normally, or after run_context swallowed BudgetExhausted/ProviderError
     # (it has already finalized the run); other exceptions propagate.
     return _record(runs_dir, log)

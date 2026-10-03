@@ -259,6 +259,7 @@ class RunRecord(BaseModel):
     domains: list[Domain]
     model: str
     judge_model: str | None = None
+    surface: str = "langchain"  # "langchain" | "mcp": which surface drove the run
     git_sha: NonEmptyStr
     prompt_sha256: NonEmptyStr
     tool_version: str

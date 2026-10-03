@@ -26,8 +26,8 @@ Event-field contract (later waves emit to this; fields marked * are read by
 ``finalize`` to derive the index row / ``run.md``; others are free-form)::
 
     run_start      run_id, software_name, intake_sha256, domains, model,
-                   judge_model, git_sha, prompt_sha256, tool_version,
-                   dataset_release, eval_case, max_model_calls, max_tokens
+                   judge_model, surface ("langchain" | "mcp"), git_sha, prompt_sha256,
+                   tool_version, dataset_release, eval_case, max_model_calls, max_tokens
                    (``RunLog.open`` recovers header fields from this event)
     intake_invalid errors (list[str])
     domain_resolved* domains (list[str])  -- latest one defines record.domains
@@ -94,7 +94,7 @@ import threading
 import time
 import traceback
 import warnings
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -416,6 +416,7 @@ class RunLog:
         eval_case: str | None = None,
         budget: Budget | None = None,
         manifest_path: Path | str | None = None,
+        surface: str = "langchain",
     ) -> RunLog:
         """Create ``runs/<run_id>/`` and emit ``run_start``."""
         runs_dir = Path(runs_dir)
@@ -442,6 +443,7 @@ class RunLog:
             "domains": list(domains),
             "model": model,
             "judge_model": judge_model,
+            "surface": surface,
             "git_sha": _git_sha(),
             "prompt_sha256": _sha256(prompt_bytes),
             "tool_version": _tool_version(),
@@ -579,6 +581,7 @@ class RunLog:
                 domains=counters["domains"] or h.get("domains") or [],
                 model=h["model"],
                 judge_model=h.get("judge_model"),
+                surface=h.get("surface") or "langchain",
                 git_sha=h["git_sha"],
                 prompt_sha256=h["prompt_sha256"],
                 tool_version=h["tool_version"],
@@ -725,6 +728,7 @@ def run_context(
     eval_case: str | None = None,
     budget: Budget | None = None,
     manifest_path: Path | str | None = None,
+    surface: str = "langchain",
 ) -> Iterator[RunLog]:
     """Start a run and guarantee it ends with ``run_end`` + index row + run.md.
 
@@ -743,6 +747,7 @@ def run_context(
         eval_case=eval_case,
         budget=budget,
         manifest_path=manifest_path,
+        surface=surface,
     )
     try:
         yield log
@@ -806,11 +811,20 @@ def read_index(runs_dir: Path | str) -> list[RunRecord]:
     ]
 
 
-def close_abandoned(runs_dir: Path | str, *, min_idle_s: float = 0.0) -> list[str]:
+def close_abandoned(
+    runs_dir: Path | str,
+    *,
+    min_idle_s: float = 0.0,
+    surface: str | None = None,
+    exclude: Collection[str] = (),
+) -> list[str]:
     """Finalize runs that have run_start but no run_end as "abandoned".
 
-    ``min_idle_s`` skips runs whose events file changed more recently than that
-    (guards against closing a live run of another process). Returns run ids closed.
+    A run is abandoned when it never ended: ``min_idle_s`` skips runs whose events file changed more
+    recently than that (guards against closing a live run of another process); ``surface`` restricts
+    to runs whose ``run_start`` recorded that surface (the MCP server passes ``"mcp"`` so it never
+    closes a LangChain run in progress); ``exclude`` skips run ids this process still owns.
+    Returns run ids closed.
     """
     runs_dir = Path(runs_dir)
     closed: list[str] = []
@@ -818,13 +832,18 @@ def close_abandoned(runs_dir: Path | str, *, min_idle_s: float = 0.0) -> list[st
         return closed
     for run_dir in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
         events_path = run_dir / "events.jsonl"
-        if not events_path.exists():
+        if not events_path.exists() or run_dir.name in exclude:
             continue
         if min_idle_s and time.time() - events_path.stat().st_mtime < min_idle_s:
             continue
-        names = {e.get("event") for e in _read_events(events_path)}
+        events = _read_events(events_path)
+        names = {e.get("event") for e in events}
         if "run_start" not in names or "run_end" in names:
             continue
+        if surface is not None:
+            start = next(e for e in events if e.get("event") == "run_start")
+            if (start.get("surface") or "langchain") != surface:
+                continue
         log = RunLog.open(run_dir)
         log.finalize("abandoned", error="run ended without run_end (session abandoned)")
         closed.append(log.run_id)

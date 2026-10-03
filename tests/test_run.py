@@ -78,6 +78,7 @@ def test_pegasus_minted(env):
     )
     rec = go(env, model)
     assert rec.terminal_state == "minted"
+    assert rec.surface == "langchain"
     assert rec.attempts == {"mobile-attack": 1}
     run_dir = env["runs_dir"] / rec.run_id
     delta = Delta.model_validate_json((run_dir / "delta.json").read_text())
