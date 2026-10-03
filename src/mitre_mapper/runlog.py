@@ -465,15 +465,18 @@ class RunLog:
 
     # -- writing
 
-    def event(self, name: str, **fields: Any) -> None:
-        """Append one flushed JSON line. Unknown names raise ValueError."""
-        if name not in EVENTS:
-            raise ValueError(f"unknown event name: {name!r}")
+    def event(self, event_name: str, /, **fields: Any) -> None:
+        """Append one flushed JSON line. Unknown names raise ValueError.
+
+        ``event_name`` is positional-only so events may carry a ``name`` field.
+        """
+        if event_name not in EVENTS:
+            raise ValueError(f"unknown event name: {event_name!r}")
         clash = _RESERVED & fields.keys()
         if clash:
             raise ValueError(f"reserved event field(s): {sorted(clash)}")
         with self._lock:
-            line = _dumps({"ts": _fmt_ts(_now()), "seq": self._seq, "event": name, **fields})
+            line = _dumps({"ts": _fmt_ts(_now()), "seq": self._seq, "event": event_name, **fields})
             _append_line(self.events_path, line)
             self._seq += 1
 

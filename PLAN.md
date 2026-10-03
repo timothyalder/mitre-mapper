@@ -98,7 +98,7 @@ log event defined inside `agent.py` is a bug.
   `attack-pattern` + deprecated `course-of-action`, e.g. T1212). ID lookups must be **type-scoped**
   (`get_object_by_attack_id(id, "attack-pattern")`).
 - **Liveness:** use one `is_inactive(obj)` = `revoked or x_mitre_deprecated`. 13 mobile attack-patterns and the
-  ICS duplicate software are deprecated **with no `revoked` key**.
+  ICS duplicate software are deprecated **but not revoked** (`revoked: false`, no successor).
 - **Revoked name-twins** (revoked technique sharing an exact name with a live one): enterprise 106/149, mobile
   11/53, ics 4/9 — e.g. `PowerShell` T1086→T1059.001, `Keychain` T1579→T1634.001. Follow `revoked-by`.
 - **Technique ID spaces are disjoint across domains** (zero overlap in all directions, including revoked).

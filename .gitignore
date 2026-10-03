@@ -20,3 +20,6 @@ datasets/*-attack.json
 runs/*/*
 !runs/*/run.md
 !runs/*/review.json
+
+# allocations registry lock (sidecar; os.replace swaps the json)
+datasets/allocations.json.lock
