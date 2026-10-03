@@ -27,7 +27,10 @@ Event-field contract (later waves emit to this; fields marked * are read by
 
     run_start      run_id, software_name, intake_sha256, domains, model,
                    judge_model, surface ("langchain" | "mcp"), git_sha, prompt_sha256,
-                   tool_version, dataset_release, eval_case, max_model_calls, max_tokens
+                   tool_version, dataset_release, eval_case, max_model_calls, max_tokens,
+                   allocations_path (str path of the SX/GX registry the run mints against;
+                   null = the canonical ``datasets/allocations.json``. Eval and demo runs use a
+                   scratch copy so they never burn real ids; ``delta doctor`` reports those as D009)
                    (``RunLog.open`` recovers header fields from this event)
     intake_invalid errors (list[str])
     domain_resolved* domains (list[str])  -- latest one defines record.domains
@@ -151,6 +154,14 @@ EVENTS: frozenset[str] = frozenset(
 
 DEFAULT_MANIFEST_PATH = Path(__file__).resolve().parents[2] / "datasets" / "MANIFEST.json"
 _RESERVED = frozenset({"ts", "seq", "event"})
+
+
+def _allocations_label(path: Path | str | None, canonical: Path) -> str | None:
+    """``run_start.allocations_path``: null for the canonical registry, else the absolute path."""
+    if path is None:
+        return None
+    p = Path(path).expanduser().resolve()
+    return None if p == canonical.expanduser().resolve() else str(p)
 _VALID_STATES = frozenset(get_args(TerminalState))
 _RECORD_ADAPTER: TypeAdapter[Any] = TypeAdapter(IndexRecord)
 
@@ -420,8 +431,13 @@ class RunLog:
         budget: Budget | None = None,
         manifest_path: Path | str | None = None,
         surface: str = "langchain",
+        allocations_path: Path | str | None = None,
     ) -> RunLog:
-        """Create ``runs/<run_id>/`` and emit ``run_start``."""
+        """Create ``runs/<run_id>/`` and emit ``run_start``.
+
+        ``allocations_path`` is recorded as given, except that the canonical registry (the
+        ``allocations.json`` next to the manifest) is recorded as null.
+        """
         runs_dir = Path(runs_dir)
         runs_dir.mkdir(parents=True, exist_ok=True)
         now = _now()
@@ -454,6 +470,9 @@ class RunLog:
             "eval_case": eval_case,
             "max_model_calls": budget.max_model_calls,
             "max_tokens": budget.max_tokens,
+            "allocations_path": _allocations_label(
+                allocations_path, Path(manifest_path or DEFAULT_MANIFEST_PATH).parent / "allocations.json"
+            ),
         }
         log = cls(run_dir, header, budget)
         log.event("run_start", **header)
@@ -732,6 +751,7 @@ def run_context(
     budget: Budget | None = None,
     manifest_path: Path | str | None = None,
     surface: str = "langchain",
+    allocations_path: Path | str | None = None,
 ) -> Iterator[RunLog]:
     """Start a run and guarantee it ends with ``run_end`` + index row + run.md.
 
@@ -751,6 +771,7 @@ def run_context(
         budget=budget,
         manifest_path=manifest_path,
         surface=surface,
+        allocations_path=allocations_path,
     )
     try:
         yield log

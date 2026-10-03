@@ -8,12 +8,16 @@ and is REQUIRED when the run resolved to several (``start_run`` reports ``domain
 a failure is returned as ``{"error": "..."}``.
 
 Run lifecycle
-    start_run(intake_path: str, fetch: bool = True, evidence_dir: str | None = None)
+    start_run(intake_path: str, fetch: bool = True, evidence_dir: str | None = None,
+              holdout: str | None = None)
         -> {run_id, software_name, type, domains, max_attempts, evidence: [{source_name, chars}],
             intake: {...summary...}, pinned_by_user: {...}}
         Parses the intake file (invalid -> {"error", "run_id"} and the run is closed), resolves domains,
         fetches the references as evidence (failures are logged, never fatal; ``evidence_dir`` reads only a
         frozen directory). Opens runs/<run_id>/ and logs ``run_start`` with ``surface: "mcp"``.
+        ``holdout`` ("pegasus" | "crackmapexec", see holdout.py) hides that eval answer from every
+        search/get tool for this run (logged as ``merge`` kind=holdout); for scoring a Claude Code run
+        against an eval case without leakage. Unknown names return an error.
     submit_proposal(run_id: str, proposal: dict, domain: str | None = None)
         -> {attempt, max_attempts, attempts_left, has_errors, errors: [...], warnings: [...], info: [...],
             next: "..."}
@@ -58,7 +62,10 @@ calls are invisible in MCP mode, so ``n_model_calls`` is 0 and ``judge_model`` i
 Registering with Claude Code (from the repo root):
     claude mcp add mitre-mapper -- uv run --directory /abs/path/to/mitre-mapper mitre-mapper-mcp
 Configuration: ``--runs-dir`` / ``MITRE_MAPPER_RUNS_DIR`` (default <repo>/runs), ``--datasets-dir`` /
-``MITRE_MAPPER_DATASETS_DIR`` (default <repo>/datasets), ``--max-attempts`` (default 3).
+``MITRE_MAPPER_DATASETS_DIR`` (default <repo>/datasets), ``--allocations-path`` /
+``MITRE_MAPPER_ALLOCATIONS_PATH`` (default <datasets-dir>/allocations.json; point demo/test sessions at a
+scratch copy so they never burn real SX/GX ids -- recorded as ``run_start.allocations_path``),
+``--max-attempts`` (default 3). See docs/mcp.md.
 """
 
 from __future__ import annotations
@@ -73,6 +80,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from mitre_mapper import tools as T
+from mitre_mapper.holdout import get_holdout
 from mitre_mapper.runlog import close_abandoned
 from mitre_mapper.session import Session, SessionError, pinned_items, start_session
 from mitre_mapper.tools import REPO_ROOT
@@ -124,9 +132,14 @@ class McpService:
     # -- lifecycle
 
     def start_run(
-        self, intake_path: str, fetch: bool = True, evidence_dir: str | None = None
+        self, intake_path: str, fetch: bool = True, evidence_dir: str | None = None,
+        holdout: str | None = None,
     ) -> dict[str, Any]:
         self.close_stale()
+        try:
+            spec = get_holdout(holdout) if holdout else None
+        except KeyError as exc:
+            return {"error": str(exc.args[0])}
         try:
             session, log = start_session(
                 intake_path,
@@ -139,6 +152,7 @@ class McpService:
                 use_cache=self.use_cache,
                 fetch_timeout=self.fetch_timeout,
                 cache_dir=self.cache_dir,
+                holdout=spec,
             )
         except Exception as exc:  # noqa: BLE001 - tools never raise
             return {"error": f"{type(exc).__name__}: {exc}"}
@@ -220,9 +234,15 @@ def create_server(
         return fn
 
     @tool
-    def start_run(intake_path: str, fetch: bool = True, evidence_dir: str | None = None) -> dict[str, Any]:
-        """Open a mapping run for an intake file. Returns run_id, domains, evidence sources, intake summary."""
-        return svc.start_run(intake_path, fetch, evidence_dir)
+    def start_run(
+        intake_path: str, fetch: bool = True, evidence_dir: str | None = None, holdout: str | None = None
+    ) -> dict[str, Any]:
+        """Open a mapping run for an intake file. Returns run_id, domains, evidence sources, intake summary.
+
+        evidence_dir: read references only from this frozen directory (no network).
+        holdout: eval holdout name ("pegasus" | "crackmapexec") hiding that answer from the ATT&CK tools.
+        """
+        return svc.start_run(intake_path, fetch, evidence_dir, holdout)
 
     @tool
     def search_techniques(run_id: str, query: str, k: int = 10, domain: str | None = None) -> dict[str, Any]:
@@ -301,9 +321,16 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="mitre-mapper-mcp", description="MITRE ATT&CK mapper MCP server (stdio).")
     ap.add_argument("--runs-dir", default=os.environ.get("MITRE_MAPPER_RUNS_DIR", str(REPO_ROOT / "runs")))
     ap.add_argument("--datasets-dir", default=os.environ.get("MITRE_MAPPER_DATASETS_DIR", str(REPO_ROOT / "datasets")))
+    ap.add_argument(
+        "--allocations-path",
+        default=os.environ.get("MITRE_MAPPER_ALLOCATIONS_PATH") or None,
+        help="SX/GX registry to mint against (default <datasets-dir>/allocations.json).",
+    )
     ap.add_argument("--max-attempts", type=int, default=3)
     args = ap.parse_args(argv)
-    create_server(args.runs_dir, args.datasets_dir, max_attempts=args.max_attempts).run()
+    create_server(
+        args.runs_dir, args.datasets_dir, args.allocations_path, max_attempts=args.max_attempts
+    ).run()
 
 
 if __name__ == "__main__":

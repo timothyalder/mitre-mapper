@@ -6,7 +6,8 @@ import ast
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "mitre_mapper"
-ALLOWED = {"agent.py", "judge.py", "run.py"}
+# llm.py is the provider-agnostic model resolver + prompted-tool-calling shim (LangChain by nature).
+ALLOWED = {"agent.py", "judge.py", "run.py", "llm.py"}
 
 
 def _imports(path: Path) -> set[str]:

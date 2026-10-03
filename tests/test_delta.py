@@ -266,3 +266,39 @@ def test_materialize_enterprise_and_cross_domain_software(tmp_path, attack_store
         assert rels[0]["target_ref"] == attack_store.domain(domain).lookup(tid, "attack-pattern").obj["id"]
     rep = doctor(run_dir, datasets_dir, allocations_path=tmp_path / "allocations.json")
     assert rep.ok, rep.findings
+
+
+def _run_start(run_dir: Path, **fields) -> None:
+    (run_dir / "events.jsonl").write_text(json.dumps({"event": "run_start", "seq": 0, **fields}) + "\n")
+
+
+def test_doctor_non_canonical_registry_is_info_not_d006(tmp_path, store, mobile_only):
+    scratch = tmp_path / "allocations.json"  # make_run mints into this scratch registry
+    run = make_run(tmp_path, store, "Alpha Spy", group=None)
+    _run_start(run, allocations_path=str(scratch))
+    other = tmp_path / "canonical.json"
+    other.write_text('{"schema_version": 1, "software": {}, "groups": {}}')
+    rep = doctor(run, mobile_only, allocations_path=other)
+    assert rep.ok and [f.code for f in rep.findings] == ["D009"]
+    assert rep.findings[0].severity == "info" and str(scratch) in rep.findings[0].message
+    # checked normally when the doctor is pointed at the very registry the run used
+    rep = doctor(run, mobile_only, allocations_path=scratch)
+    assert rep.ok and rep.findings == []
+
+
+def test_doctor_eval_run_without_allocations_field_is_non_canonical(tmp_path, store, mobile_only):
+    run = make_run(tmp_path, store, "Alpha Spy", group=None)
+    _run_start(run, eval_case="pegasus-ios")
+    other = tmp_path / "canonical.json"
+    other.write_text('{"schema_version": 1, "software": {}, "groups": {}}')
+    rep = doctor(run, mobile_only, allocations_path=other)
+    assert rep.ok and [f.code for f in rep.findings] == ["D009"] and "eval" in rep.findings[0].message
+
+
+def test_doctor_canonical_run_still_reports_d006(tmp_path, store, mobile_only):
+    run = make_run(tmp_path, store, "Alpha Spy", group=None)
+    _run_start(run, allocations_path=None, eval_case=None)
+    other = tmp_path / "canonical.json"
+    other.write_text('{"schema_version": 1, "software": {}, "groups": {}}')
+    rep = doctor(run, mobile_only, allocations_path=other)
+    assert not rep.ok and "D006" in {f.code for f in rep.findings} and "D009" not in {f.code for f in rep.findings}

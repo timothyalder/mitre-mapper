@@ -45,6 +45,7 @@ from mitre_mapper.models import (
     TechniqueMapping,
 )
 from mitre_mapper.runlog import Budget, RunLog
+from mitre_mapper.holdout import HoldoutSpec
 from mitre_mapper.store import AttackStore, get_store
 from mitre_mapper.tools import REPO_ROOT, ToolContext, now_stix, preview_lint
 
@@ -763,9 +764,13 @@ def start_session(
     fetch_timeout: float = 20.0,
     cache_dir: Path | str | None = None,
     skill_path: Path | str = DEFAULT_SKILL_PATH,
+    holdout: HoldoutSpec | None = None,
 ) -> tuple[Session | None, RunLog]:
     """Open an MCP run (``surface="mcp"``). Returns ``(session, log)``; ``session`` is None when the
-    intake was invalid (the run is then already closed as ``error`` with ``intake_invalid`` logged)."""
+    intake was invalid (the run is then already closed as ``error`` with ``intake_invalid`` logged).
+
+    ``holdout`` hides an eval answer from the store exactly as ``run.map_software`` does (the diff is
+    logged as ``merge`` kind=holdout); it does not make the run an eval run (no ``eval_case``)."""
     intake_path = Path(intake_path).expanduser()
     datasets_dir = Path(datasets_dir)
     allocations_path = Path(allocations_path or datasets_dir / "allocations.json")
@@ -789,6 +794,7 @@ def start_session(
         budget=Budget(max_model_calls=0),  # model calls are invisible over MCP; attempts are counted instead
         manifest_path=datasets_dir / "MANIFEST.json",
         surface="mcp",
+        allocations_path=allocations_path,
     )
     if spec is None:
         log.event("intake_invalid", errors=errors)
@@ -804,9 +810,16 @@ def start_session(
             fetch=fetch, use_cache=use_cache, timeout=fetch_timeout,
         )
         log.event("merge", kind="judge_config", judge=None, note="no judge model configured; judge skipped")
-        log.event("merge", kind="mcp_config", max_attempts=max_attempts, surface="mcp")
+        log.event("merge", kind="mcp_config", max_attempts=max_attempts, surface="mcp",
+                  holdout=holdout.name if holdout else None)
+        store = get_store(datasets_dir, holdout)
+        if holdout is not None:
+            for d in domains:
+                report = store.domain(d).holdout_report
+                if report is not None:
+                    log.event("merge", kind="holdout", **report.to_event())
         session = Session(
-            log=log, spec=spec, store=get_store(datasets_dir), allocations=Allocations(allocations_path),
+            log=log, spec=spec, store=store, allocations=Allocations(allocations_path),
             evidence=evidence, domains=domains, created=now_stix(), datasets_dir=datasets_dir,
             max_attempts=max_attempts,
         )

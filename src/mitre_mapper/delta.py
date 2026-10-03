@@ -199,7 +199,7 @@ def materialize(
 
 class DoctorFinding(BaseModel):
     code: str
-    severity: Literal["error", "warn"]
+    severity: Literal["error", "warn", "info"]
     message: str
     object_id: str | None = None
 
@@ -259,13 +259,17 @@ def doctor(run_dir: Path, datasets_dir: Path, *, allocations_path: Path | None =
     deprecated; D004 relationship would not be materialized in any target domain (endpoints
     never share a bundle); D005 MITRE now publishes software/group with a matching name or
     alias (retire the delta); D006 allocation record missing or different; D007 SX/GX id
-    or minted STIX id present upstream; D008 dataset for a target domain is missing.
+    or minted STIX id present upstream; D008 dataset for a target domain is missing; D009 (info)
+    the run minted against a non-canonical allocation registry (``run_start.allocations_path`` set,
+    or an eval run), so its SX/GX ids are not checked against the registry -- unless
+    ``allocations_path`` here is that same registry.
     """
     delta = load_delta(Path(run_dir))
-    allocs = Allocations(allocations_path or Path(datasets_dir) / "allocations.json")
+    registry = Path(allocations_path or Path(datasets_dir) / "allocations.json")
+    allocs = Allocations(registry)
     report = DoctorReport(run_id=delta.run_id)
 
-    def add(code: str, severity: Literal["error", "warn"], message: str, object_id: str | None = None) -> None:
+    def add(code: str, severity: Literal["error", "warn", "info"], message: str, object_id: str | None = None) -> None:
         report.findings.append(DoctorFinding(code=code, severity=severity, message=message, object_id=object_id))
 
     bundles: dict[str, _Bundle] = {}
@@ -326,14 +330,23 @@ def doctor(run_dir: Path, datasets_dir: Path, *, allocations_path: Path | None =
                         )
                         report.retire = True
 
-    # D006/D007: allocations.
+    # D009 / D006 / D007: allocations.
+    minted_against = _run_registry(Path(run_dir))
+    check_registry = minted_against is None or (
+        minted_against != "eval" and Path(minted_against).resolve() == registry.resolve()
+    )
+    if not check_registry and delta.allocations:
+        where = "an eval run's scratch registry" if minted_against == "eval" else minted_against
+        add("D009", "info", f"non-canonical allocation registry ({where}); SX/GX ids "
+            f"{', '.join(sorted(delta.allocations))} not checked against {registry.name}")
     for attack_id, stix_id in delta.allocations.items():
         kind = "group" if attack_id.startswith("GX") else "software"
-        rec = allocs.lookup(attack_id)
-        if rec is None:
-            add("D006", "error", f"{attack_id} is not in allocations.json", stix_id)
-        elif rec["stix_id"] != stix_id:
-            add("D006", "error", f"{attack_id} is allocated to {rec['stix_id']}, delta says {stix_id}", stix_id)
+        if check_registry:
+            rec = allocs.lookup(attack_id)
+            if rec is None:
+                add("D006", "error", f"{attack_id} is not in allocations.json", stix_id)
+            elif rec["stix_id"] != stix_id:
+                add("D006", "error", f"{attack_id} is allocated to {rec['stix_id']}, delta says {stix_id}", stix_id)
         if stix_id not in ours:
             add("D006", "warn", f"allocated {kind} {attack_id} ({stix_id}) has no object in the delta", stix_id)
     for obj in delta.objects:
@@ -349,6 +362,25 @@ def doctor(run_dir: Path, datasets_dir: Path, *, allocations_path: Path | None =
 
     report.ok = not any(f.severity == "error" for f in report.findings)
     return report
+
+
+def _run_registry(run_dir: Path) -> str | None:
+    """The non-canonical registry a run minted against: its ``run_start.allocations_path``, ``"eval"``
+    for an eval run that predates that field, or None (canonical, or no events log to tell)."""
+    path = run_dir / "events.jsonl"
+    if not path.is_file():
+        return None
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("event") == "run_start":
+                if ev.get("allocations_path"):
+                    return str(ev["allocations_path"])
+                return "eval" if ev.get("eval_case") else None
+    return None
 
 
 def doctor_all(runs_dir: Path, datasets_dir: Path, *, allocations_path: Path | None = None) -> list[DoctorReport]:

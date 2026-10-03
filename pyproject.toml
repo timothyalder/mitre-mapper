@@ -25,6 +25,11 @@ dependencies = [
 mitre-mapper = "mitre_mapper.cli:app"
 mitre-mapper-mcp = "mitre_mapper.mcp_server:main"
 
+[project.optional-dependencies]
+claude-code = [
+    "claude-code-langchain @ git+https://github.com/kapp667/claude-code-sdk-langchain",
+]
+
 [build-system]
 requires = ["uv_build>=0.12.22,<0.13.0"]
 build-backend = "uv_build"

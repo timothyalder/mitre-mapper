@@ -23,13 +23,13 @@ from typing import Any
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain.agents.structured_output import StructuredOutputError, ToolStrategy
-from langchain.chat_models import init_chat_model
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.tools import StructuredTool
 from langgraph.errors import GraphRecursionError
 
 from mitre_mapper import tools as T
+from mitre_mapper.llm import resolve_model
 from mitre_mapper.models import MappingProposal
 from mitre_mapper.runlog import BudgetExhausted, ProviderError, RunLog
 
@@ -149,7 +149,7 @@ def build_agent(
     model: str | BaseChatModel, ctx: T.ToolContext, system_prompt: str
 ) -> BuiltAgent:
     """Compile the mapping agent. Logs the recursion limit it will run with."""
-    chat = init_chat_model(model) if isinstance(model, str) else model
+    chat = resolve_model(model)
     graph = create_agent(
         chat,
         tools=_langchain_tools(ctx),

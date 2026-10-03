@@ -13,10 +13,10 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
+from mitre_mapper.llm import resolve_model
 from mitre_mapper.models import IntakeSpec, MappingProposal, TechniqueMapping
 
 MAX_CHARS_PER_SOURCE = 12_000
@@ -50,7 +50,7 @@ the software and the group."""
 
 
 def _chat(model: Any) -> Any:
-    return init_chat_model(model) if isinstance(model, str) else model
+    return resolve_model(model)
 
 
 def _model_name(model: Any) -> str:

@@ -352,3 +352,51 @@ def test_agent_duplicates_of_user_asserted_items_are_dropped_not_e003(server, en
     assert dd["technique_ids"] == ["T1404"] and dd["group_ids"] == ["G0142"] and dd["domain"] == "mobile-attack"
     assert not any(e["event"] == "lint_result" and e.get("phase") == "final" and
                    any(f["severity"] == "ERROR" for f in e["findings"]) for e in events(env, rid))
+
+
+def test_run_start_records_scratch_allocations_path(server, env):
+    run_id = start(server)["run_id"]
+    rs = next(e for e in events(env, run_id) if e["event"] == "run_start")
+    assert rs["allocations_path"] == str(env["alloc"].resolve()) and rs["surface"] == "mcp"
+
+
+def test_main_reads_allocations_path_flag_and_env(monkeypatch, tmp_path):
+    seen = {}
+
+    class Fake:
+        def run(self):
+            pass
+
+    def fake_create(runs_dir, datasets_dir, allocations_path=None, **kw):
+        seen["alloc"] = allocations_path
+        return Fake()
+
+    monkeypatch.setattr("mitre_mapper.mcp_server.create_server", fake_create)
+    from mitre_mapper.mcp_server import main
+
+    main(["--runs-dir", str(tmp_path), "--allocations-path", "/x/a.json"])
+    assert seen["alloc"] == "/x/a.json"
+    monkeypatch.setenv("MITRE_MAPPER_ALLOCATIONS_PATH", "/y/b.json")
+    main(["--runs-dir", str(tmp_path)])
+    assert seen["alloc"] == "/y/b.json"
+    monkeypatch.delenv("MITRE_MAPPER_ALLOCATIONS_PATH")
+    main(["--runs-dir", str(tmp_path)])
+    assert seen["alloc"] is None
+
+
+def test_start_run_holdout_hides_the_answer(server, env):
+    out = call(server, "start_run", intake_path=str(FIXTURE), fetch=False, holdout="pegasus")
+    run_id = out["run_id"]
+    assert "error" in call(server, "get_software", run_id=run_id, attack_id="S0289")  or \
+        not call(server, "get_software", run_id=run_id, attack_id="S0289").get("id")
+    hits = call(server, "search_software", run_id=run_id, query="Pegasus")
+    assert "S0289" not in json.dumps(hits) and "S0316" not in json.dumps(hits)
+    evs = events(env, run_id)
+    assert any(e["event"] == "merge" and e.get("kind") == "holdout" for e in evs)
+    assert next(e for e in evs if e["event"] == "run_start").get("eval_case") is None
+    call(server, "end_run", run_id=run_id, reason="test")
+
+
+def test_start_run_unknown_holdout(server):
+    out = call(server, "start_run", intake_path=str(FIXTURE), fetch=False, holdout="nope")
+    assert "error" in out and "unknown holdout" in out["error"]

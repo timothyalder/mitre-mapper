@@ -27,6 +27,7 @@ from typing import Any
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from mitre_mapper.llm import resolve_model
 from mitre_mapper.models import IntakeSpec, MappingProposal, RubricItem, Verdict
 from mitre_mapper.runlog import ProviderError
 
@@ -167,11 +168,7 @@ def judge(
     ).hexdigest()
     start = time.perf_counter()
     try:
-        if isinstance(model, str):
-            from langchain.chat_models import init_chat_model
-
-            model = init_chat_model(model)
-        out = model.with_structured_output(Verdict, include_raw=True).invoke(messages)
+        out = resolve_model(model).with_structured_output(Verdict, include_raw=True).invoke(messages)
     except ProviderError:
         raise
     except Exception as exc:

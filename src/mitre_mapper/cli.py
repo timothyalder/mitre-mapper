@@ -55,6 +55,13 @@ def map_cmd(
     no_cache: Annotated[bool, typer.Option("--no-cache", help="Ignore the fetch cache.")] = False,
     fetch_timeout: Annotated[float, typer.Option(help="Per-reference fetch timeout (s).")] = 20.0,
     cache_dir: Annotated[Path | None, typer.Option(help="Fetch cache dir.")] = None,
+    allocations_path: Annotated[
+        Path | None,
+        typer.Option(
+            help="SX/GX allocation registry to mint against (default <datasets-dir>/allocations.json). "
+            "Point demo/test runs at a scratch copy so they never burn real ids; recorded on run_start.",
+        ),
+    ] = None,
 ) -> None:
     """Map INTAKE to ATT&CK objects; prints run id, terminal state and run.md path."""
     cfg = Config()
@@ -77,6 +84,7 @@ def map_cmd(
         use_cache=cfg.use_cache and not no_cache,
         fetch_timeout=fetch_timeout,
         cache_dir=cache_dir or cfg.cache_dir,
+        allocations_path=allocations_path,
     )
     typer.echo(f"run_id: {record.run_id}")
     typer.echo(f"terminal_state: {record.terminal_state}")

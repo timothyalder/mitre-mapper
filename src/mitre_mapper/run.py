@@ -278,6 +278,7 @@ def map_software(
         eval_case=eval_case,
         budget=budget,
         manifest_path=datasets_dir / "MANIFEST.json",
+        allocations_path=allocations_path,
     ) as log:
         if spec is None:
             log.event("intake_invalid", errors=intake_errors)

@@ -63,7 +63,7 @@ def test_map_command_prints_summary(tmp_path, monkeypatch):
     alloc = tmp_path / "ds"
     shutil.copytree(ROOT / "datasets", alloc, ignore=shutil.ignore_patterns("enterprise*", "ics*"))
     model = ScriptedChatModel(script=[proposal_msg(GOOD)])
-    monkeypatch.setattr("mitre_mapper.agent.init_chat_model", lambda name: model)
+    monkeypatch.setattr("langchain.chat_models.init_chat_model", lambda name: model)  # via llm.resolve_model
     res = runner.invoke(
         app,
         [
@@ -196,3 +196,36 @@ def test_materialize_command_reports_errors(tmp_path):
          "--runs-dir", str(run_dir.parent), "--datasets-dir", str(ds)],
     )
     assert res.exit_code == 1 and "not targeted" in res.output
+
+
+def test_map_passes_allocations_path_and_run_start_records_it(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_map(intake, **kw):
+        seen.update(kw)
+        raise SystemExit(0)
+
+    monkeypatch.setattr("mitre_mapper.run.map_software", fake_map)
+    scratch = tmp_path / "scratch-alloc.json"
+    runner.invoke(app, ["map", str(FIXTURE), "--model", "m", "--allocations-path", str(scratch)])
+    assert seen["allocations_path"] == scratch
+    seen.clear()
+    runner.invoke(app, ["map", str(FIXTURE), "--model", "m"])
+    assert seen["allocations_path"] is None
+
+
+def test_run_start_allocations_path_is_null_for_canonical_registry(tmp_path):
+    ds = tmp_path / "ds"
+    shutil.copytree(ROOT / "datasets", ds, ignore=shutil.ignore_patterns("enterprise*", "ics*"))
+    scratch = tmp_path / "scratch.json"
+    shutil.copy(ds / "allocations.json", scratch)
+    starts = {}
+    for label, alloc in (("canonical", None), ("scratch", scratch)):
+        rec = map_software(
+            FIXTURE, model=ScriptedChatModel(script=[proposal_msg(GOOD)]), runs_dir=tmp_path / label,
+            datasets_dir=ds, allocations_path=alloc, fetch=False,
+        )
+        evs = [json.loads(l) for l in (tmp_path / label / rec.run_id / "events.jsonl").read_text().splitlines()]
+        starts[label] = next(e for e in evs if e["event"] == "run_start")
+    assert starts["canonical"]["allocations_path"] is None
+    assert starts["scratch"]["allocations_path"] == str(scratch.resolve())
