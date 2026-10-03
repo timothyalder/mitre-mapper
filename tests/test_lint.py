@@ -15,6 +15,10 @@ from mitre_mapper.models import (
     TechniqueMapping,
 )
 
+QUOTE = "collects location data"
+REPORT_TEXT = "The Lookout report says Pegasus for iOS (thin) collects location data and SMS messages."
+DEFAULT_EVIDENCE = {"Lookout Pegasus": REPORT_TEXT}  # real text for every technique quote below
+
 CREATED = "2026-10-03T12:34:56.000Z"
 SPEC = IntakeSpec(
     name="Pegasus for iOS (thin)",
@@ -32,7 +36,7 @@ def proposal(*tids, **kw):
             TechniqueMapping(
                 technique_id=t,
                 rationale="r",
-                evidence=[EvidenceQuote(source_name="Lookout Pegasus", quote="q")],
+                evidence=[EvidenceQuote(source_name="Lookout Pegasus", quote=QUOTE)],
             )
             for t in tids
         ],
@@ -51,7 +55,7 @@ def make_ctx(attack_store, mobile_store, tmp_path):
         if mutate:
             mutate(objects)
         return LintContext(
-            prop, "mobile-attack", mobile_store, objects, alloc, evidence or {}, spec
+            prop, "mobile-attack", mobile_store, objects, alloc, DEFAULT_EVIDENCE if evidence is None else evidence, spec
         )
 
     return make
@@ -63,7 +67,7 @@ def ids(findings):
 
 def test_registry_has_all_rules():
     assert sorted(RULES) == [
-        *[f"E{i:03d}" for i in range(1, 12)],
+        *[f"E{i:03d}" for i in range(1, 13)],
         *[f"I{i:03d}" for i in range(1, 5)],
         *[f"W{i:03d}" for i in range(1, 6)],
     ]
@@ -211,7 +215,7 @@ def test_enterprise_round_trip_and_revoked(datasets_dir, tmp_path):
     spec = IntakeSpec(
         name="Test Enterprise Tool", type="tool", platforms=["Windows"], body="x", references=[ref]
     )
-    ev = [EvidenceQuote(source_name="Src", quote="q")]
+    ev = [EvidenceQuote(source_name="Src", quote=QUOTE)]
     prop = MappingProposal(
         domain="enterprise-attack",
         techniques=[
@@ -223,7 +227,7 @@ def test_enterprise_round_trip_and_revoked(datasets_dir, tmp_path):
     built = build_objects(spec, {"enterprise-attack": prop}, store, alloc, CREATED, commit=False)
     ctx = LintContext(
         prop, "enterprise-attack", store.domain("enterprise-attack"),
-        built.by_domain["enterprise-attack"], alloc, spec=spec,
+        built.by_domain["enterprise-attack"], alloc, evidence={"Src": REPORT_TEXT}, spec=spec,
     )
     assert [f.rule_id for f in lint(ctx) if f.severity is Severity.ERROR] == ["E002", "E003"]
     [f] = RULES["E002"].check(ctx)
@@ -280,7 +284,7 @@ def test_e005_resolves_when_ref_present(make_ctx):
     p = TechniqueMapping(
         technique_id="T1430",
         rationale="r",
-        evidence=[EvidenceQuote(source_name="Lookout Pegasus", quote="q")],
+        evidence=[EvidenceQuote(source_name="Lookout Pegasus", quote=QUOTE)],
         user_asserted=False,
     )
     ctx = make_ctx(MappingProposal(domain="mobile-attack", techniques=[p]))
@@ -340,7 +344,7 @@ def test_w001_platform_mismatch_and_match(make_ctx):
 def test_w001_skipped_in_ics(attack_store, tmp_path):
     ics = attack_store.domain("ics-attack")
     tid = ics.attack_id(ics.objects("attack-pattern")[0])
-    ev = [EvidenceQuote(source_name="Lookout Pegasus", quote="q")]
+    ev = [EvidenceQuote(source_name="Lookout Pegasus", quote=QUOTE)]
     prop = MappingProposal(
         domain="ics-attack",
         techniques=[TechniqueMapping(technique_id=tid, rationale="r", evidence=ev)],
@@ -383,7 +387,7 @@ def test_w003_parent_and_child(make_ctx):
 def test_w004_tool_in_ics(attack_store, tmp_path):
     ics = attack_store.domain("ics-attack")
     tid = ics.attack_id(ics.objects("attack-pattern")[0])
-    ev = [EvidenceQuote(source_name="Lookout Pegasus", quote="q")]
+    ev = [EvidenceQuote(source_name="Lookout Pegasus", quote=QUOTE)]
     prop = MappingProposal(
         domain="ics-attack",
         techniques=[TechniqueMapping(technique_id=tid, rationale="r", evidence=ev)],
@@ -480,7 +484,7 @@ def group_proposal(group_id, quote, source="Src", **kw):
             TechniqueMapping(
                 technique_id="T1430",
                 rationale="r",
-                evidence=[EvidenceQuote(source_name="Src", quote="q")],
+                evidence=[EvidenceQuote(source_name="Src", quote=QUOTE)],
             )
         ],
         groups=[GroupMapping(group_id=group_id, quote=quote, source_name=source, **kw)],
@@ -494,7 +498,7 @@ def test_e011_grounded_quote_passes_and_group_link_is_minted(make_ctx, mobile_gr
     ctx = make_ctx(
         group_proposal(gid, quote),
         spec=GROUP_SPEC,
-        evidence={"Src": f"Intro.\n  {alias}  deployed\nPegasus for iOS (thin) against targets. Tail."},
+        evidence={"Src": f"Intro.\n  {alias}  deployed\nPegasus for iOS (thin) against targets. Tail. " + REPORT_TEXT},
     )
     assert RULES["E011"].check(ctx) == []
     assert any(o["type"] == "relationship" and o["source_ref"] == group["id"] for o in ctx.objects)
@@ -608,3 +612,64 @@ def test_w005_conflicting_definition_in_allocations(make_ctx, tmp_path):
     [f] = RULES["W005"].check(ctx2)
     assert f.details["kind"] == "definition_conflict" and f.details["first_run"] == "run-1"
     assert f.details["attack_id"].startswith("GX")
+
+
+def _e012(prop, evidence, spec=SPEC):
+    ctx = LintContext(prop, "mobile-attack", None, [], None, evidence, spec)  # type: ignore[arg-type]
+    return RULES["E012"].check(ctx)
+
+
+def _tech(tid, source, quote, **kw):
+    return TechniqueMapping(
+        technique_id=tid, rationale="r", evidence=[EvidenceQuote(source_name=source, quote=quote)], **kw
+    )
+
+
+def test_e012_passes_for_verbatim_quotes_with_normalisation():
+    prop = MappingProposal(domain="mobile-attack", techniques=[_tech("T1430", "Lookout Pegasus", "  COLLECTS\nlocation   data ")])
+    assert _e012(prop, {"Lookout Pegasus": REPORT_TEXT}) == []
+
+
+def test_e012_quote_not_found():
+    prop = MappingProposal(
+        domain="mobile-attack",
+        techniques=[_tech("T1430", "Lookout Pegasus", "collects location data ... and SMS messages")],
+    )
+    [f] = _e012(prop, {"Lookout Pegasus": REPORT_TEXT})
+    assert f.rule_id == "E012" and f.severity is Severity.ERROR and f.target == "T1430"
+    assert f.details["technique_id"] == "T1430" and f.details["source_name"] == "Lookout Pegasus"
+    assert f.details["reason"] == "quote_not_found"
+    assert f.details["quote_prefix"].startswith("collects location data ...")
+
+
+def test_e012_source_missing_when_no_fetched_text():
+    prop = MappingProposal(domain="mobile-attack", techniques=[_tech("T1430", "Lookout Pegasus", "collects location data")])
+    [f] = _e012(prop, {})
+    assert f.details["reason"] == "source_missing"
+    [g] = _e012(prop, {"Other": REPORT_TEXT})
+    assert g.details["reason"] == "source_missing"
+
+
+def test_e012_intake_prose_is_a_source_and_the_user_asserted_name_is_not():
+    spec = SPEC.model_copy(update={"body": "Pegasus reads SMS messages and call logs."})
+    ok = MappingProposal(domain="mobile-attack", techniques=[_tech("T1430", "mitre-mapper intake description", "reads sms messages")])
+    assert _e012(ok, {}, spec) == []
+    wrong = MappingProposal(domain="mobile-attack", techniques=[_tech("T1430", "mitre-mapper intake", "reads sms messages")])
+    assert _e012(wrong, {}, spec)[0].details["reason"] == "source_missing"
+    absent = MappingProposal(domain="mobile-attack", techniques=[_tech("T1430", "mitre-mapper intake description", "records audio")])
+    assert _e012(absent, {}, spec)[0].details["reason"] == "quote_not_found"
+
+
+def test_e012_exempts_user_asserted_and_checks_every_quote():
+    asserted = TechniqueMapping(technique_id="T1404", rationale="r", user_asserted=True)
+    two = TechniqueMapping(
+        technique_id="T1430",
+        rationale="r",
+        evidence=[
+            EvidenceQuote(source_name="Lookout Pegasus", quote="collects location data"),
+            EvidenceQuote(source_name="Lookout Pegasus", quote="invented sentence"),
+        ],
+    )
+    prop = MappingProposal(domain="mobile-attack", techniques=[asserted, two])
+    [f] = _e012(prop, {"Lookout Pegasus": REPORT_TEXT})
+    assert f.details["quote_prefix"] == "invented sentence"

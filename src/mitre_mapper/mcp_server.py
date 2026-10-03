@@ -74,7 +74,7 @@ from fastmcp import FastMCP
 
 from mitre_mapper import tools as T
 from mitre_mapper.runlog import close_abandoned
-from mitre_mapper.session import Session, SessionError, start_session
+from mitre_mapper.session import Session, SessionError, pinned_items, start_session
 from mitre_mapper.tools import REPO_ROOT
 
 DEFAULT_IDLE_CLOSE_S = 30 * 60
@@ -167,12 +167,7 @@ class McpService:
                 ],
                 "prose": spec.body.strip(),
             },
-            "pinned_by_user": {
-                "techniques": list(spec.techniques),
-                "existing_groups": [g.ref for g in spec.groups if g.ref],
-                "new_groups": [g.new.name for g in spec.groups if g.new],
-                "note": "These are added by the tool (never judged); do not repeat them in proposals.",
-            },
+            "pinned_by_user": pinned_items(spec),
         }
 
     def _context(

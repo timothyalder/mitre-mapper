@@ -308,6 +308,7 @@ quota manufactures false positives.
 | E009 | `external_references[0]` is `source_name: "mitre-attack"` with `external_id` matching `^SX\d{4}$` / `^GX\d{4}$` and consistent with `allocations.json` |
 | E010 | **round-trip:** the minted objects merged into the domain bundle load through `MitreAttackData` and resolve via `get_object_by_attack_id` and `get_techniques_used_by_software` |
 | E011 | **agent-proposed group link quote:** the relationship carries a verbatim quote that appears in fetched evidence text (whitespace-normalized) and contains the software name/alias **and** the ATT&CK group name/alias. Log which aliases matched. |
+| E012 | **technique evidence quote:** every `EvidenceQuote` on an agent-proposed technique appears verbatim (`groups.normalize_text`) in the named source's fetched text; the intake prose is the source `mitre-mapper intake description` (user-asserted items cite `mitre-mapper intake`). A source with no fetched text fails (`source_missing` / `quote_not_found`). |
 
 **WARN**: W001 platform intersection (software ∩ technique platforms ≠ ∅; ignore in ICS) · W002
 name/alias collision with existing software ("this may be S0605 — review") · W003 parent and child technique

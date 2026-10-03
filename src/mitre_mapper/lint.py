@@ -4,7 +4,7 @@ ERROR blocks mint, WARN is logged, INFO is a measured fact. Rules that count
 things are INFO, never ERROR. Finding ``details`` carry ids and expected-vs-actual
 values because the caller (run.py) logs findings for a later diagnosing agent.
 
-Rules: E001-E011, W001-W005, I001-I004. E011 and W005 delegate to ``groups``.
+Rules: E001-E012, W001-W005, I001-I004. E011, E012 and W005 delegate to ``groups``.
 """
 
 from __future__ import annotations
@@ -505,6 +505,45 @@ def _e011(ctx: LintContext) -> list[LintFinding]:
     return findings
 
 
+def _e012(ctx: LintContext) -> list[LintFinding]:
+    """Agent-proposed technique evidence quotes appear verbatim in the named source's text."""
+    rule, findings = RULES["E012"], []
+    from .groups import normalize_text
+    from .intake import INTAKE_PROSE_SOURCE
+
+    texts = dict(ctx.evidence)
+    if ctx.spec is not None and ctx.spec.body.strip():
+        texts.setdefault(INTAKE_PROSE_SOURCE, ctx.spec.body)
+    normalized: dict[str, str] = {}
+    for mapping in ctx.proposal.techniques:
+        if mapping.user_asserted:
+            continue
+        for ev in mapping.evidence:
+            if ev.source_name not in texts:
+                reason = "source_missing"
+            else:
+                haystack = normalized.setdefault(ev.source_name, normalize_text(texts[ev.source_name]))
+                quote = normalize_text(ev.quote)
+                reason = None if quote and quote in haystack else "quote_not_found"
+            if reason is None:
+                continue
+            prefix = " ".join(ev.quote.split())[:60]
+            findings.append(
+                _finding(
+                    rule,
+                    f"technique {mapping.technique_id} evidence quote fails the check ({reason}) "
+                    f"for source {ev.source_name!r}: {prefix!r}",
+                    mapping.technique_id,
+                    technique_id=mapping.technique_id,
+                    source_name=ev.source_name,
+                    reason=reason,
+                    quote_prefix=prefix,
+                    evidence_sources=sorted(texts),
+                )
+            )
+    return findings
+
+
 # --------------------------------------------------------------------------- WARN rules
 
 
@@ -743,6 +782,7 @@ RULES: dict[str, LintRule] = {
         _rule("E009", Severity.ERROR, "mitre-attack ref first, SX/GX id matches registry", _e009),
         _rule("E010", Severity.ERROR, "minted objects round-trip through MitreAttackData", _e010),
         _rule("E011", Severity.ERROR, "agent-proposed group link quote is grounded", _e011),
+        _rule("E012", Severity.ERROR, "agent-proposed technique evidence quotes are verbatim", _e012),
         _rule("W001", Severity.WARN, "software and technique platforms intersect", _w001),
         _rule("W002", Severity.WARN, "name/alias collides with existing software", _w002),
         _rule("W003", Severity.WARN, "parent and child technique both proposed", _w003),

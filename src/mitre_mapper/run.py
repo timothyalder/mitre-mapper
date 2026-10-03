@@ -43,6 +43,8 @@ from mitre_mapper.session import (  # the shared core (also driven by the MCP se
     log_no_structured_output,
     log_unmatched_actors,
     process_proposal,
+    render_pinned,
+    render_retry_message,
 )
 from mitre_mapper.store import AttackStore, get_store
 from mitre_mapper.tools import ToolContext, now_stix
@@ -77,7 +79,13 @@ def render_judge_feedback(verdict: Verdict) -> str:
     return "\n".join(lines)
 
 
-def _first_message(spec: IntakeSpec, domain: str, evidence: dict[str, str], feedback: str | None) -> str:
+def _first_message(
+    spec: IntakeSpec,
+    domain: str,
+    evidence: dict[str, str],
+    feedback: str | None,
+    prev: MappingProposal | None = None,
+) -> str:
     refs = "\n".join(
         f"- {r.source_name}" + (f" ({r.url})" if r.url else "") + (f": {r.description}" if r.description else "")
         for r in spec.references
@@ -91,13 +99,11 @@ def _first_message(spec: IntakeSpec, domain: str, evidence: dict[str, str], feed
         f"Evidence available via get_evidence: {', '.join(sorted(evidence)) or 'none'}",
         f"Intake prose:\n{spec.body.strip() or '(none)'}",
     ]
-    if spec.techniques:
-        parts.append(
-            "The user already pinned these techniques (do not repeat them): "
-            + ", ".join(spec.techniques)
-        )
+    pinned = render_pinned(spec)
+    if pinned:
+        parts.append(pinned)
     if feedback:
-        parts.append(feedback)
+        parts.append(render_retry_message(feedback, prev))
     return "\n\n".join(parts)
 
 
@@ -174,7 +180,8 @@ def _attempt_domain(
     for attempt in range(1, max_attempts + 1):
         ctx.returned_ids.clear()
         try:
-            raw = invoke_agent(agent, [{"role": "user", "content": _first_message(spec, domain, evidence, feedback)}])
+            message = _first_message(spec, domain, evidence, feedback, prev)
+            raw = invoke_agent(agent, [{"role": "user", "content": message}])
         except AgentOutputError as exc:
             log_no_structured_output(log, domain, attempt, str(exc))
             feedback = "You did not call the MappingProposal tool. Finish by calling it."

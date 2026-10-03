@@ -20,7 +20,7 @@ GOOD = {
         {
             "technique_id": t,
             "rationale": "described",
-            "evidence": [{"source_name": "Test Fixture Reference", "quote": "collects location data"}],
+            "evidence": [{"source_name": "mitre-mapper intake description", "quote": "collects location data"}],
         }
         for t in ("T1430", "T1429", "T1409")
     ],

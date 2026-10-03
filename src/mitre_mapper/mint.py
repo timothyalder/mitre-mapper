@@ -19,7 +19,7 @@ import stix2.v20 as stix
 
 from .allocations import Allocations
 from .groups import definition_sha256
-from .intake import INTAKE_SOURCE
+from .intake import INTAKE_PROSE_SOURCE, INTAKE_SOURCE
 from .models import (
     ExternalReference,
     GroupMapping,
@@ -367,6 +367,10 @@ def build_objects(
         ExternalReference(
             source_name=INTAKE_SOURCE,
             description=f"Asserted by the user in the intake file for {spec.name}.",
+        ),
+        ExternalReference(
+            source_name=INTAKE_PROSE_SOURCE,
+            description=f"Intake description provided by the user for {spec.name}.",
         ),
     ]
 

@@ -64,6 +64,8 @@ Event-field contract (later waves emit to this; fields marked * are read by
     merge          kind = "agent_config" (domain, recursion_limit, ...) | "judge_config"
                    (judge: model name or null = judge skipped, logged once) | "cross_domain"
                    (domains, n_techniques, n_groups)
+                   | "dedupe_user_asserted" (domain, technique_ids, group_ids: agent-proposed
+                   items dropped because the user asserted the same technique/group)
     allocation     attack_id, name, stix_id
     mint           software_id, n_objects, domains,
                    techniques: {domain: [{id, name, user_asserted, sources: [source_name]}]},

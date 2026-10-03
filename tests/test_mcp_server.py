@@ -23,13 +23,14 @@ ROOT = Path(__file__).resolve().parents[1]
 DATASETS = ROOT / "datasets"
 FIXTURE = ROOT / "tests" / "fixtures" / "pegasus-ios.md"
 REF = "Test Fixture Reference"
+PROSE = "mitre-mapper intake description"  # the intake prose, as an evidence source
 
 
 def tech(tid: str, **extra: Any) -> dict:
     return {
         "technique_id": tid,
         "rationale": "Described in the intake prose.",
-        "evidence": [{"source_name": REF, "quote": "collects location data"}],
+        "evidence": [{"source_name": PROSE, "quote": "collects location data"}],
         **extra,
     }
 
@@ -306,3 +307,48 @@ def test_close_stale_never_closes_runs_this_process_owns(env):
     _age(env["runs"] / rid, 3600)
     assert svc.close_stale() == []
     assert read_index(env["runs"]) == []
+
+
+def _pinned_intake(env) -> Path:
+    intake = env["tmp"] / "pinned.md"
+    intake.write_text(
+        FIXTURE.read_text().replace("platforms: [iOS]", "platforms: [iOS]\ntechniques: [T1404]\ngroups:\n  - ref: G0142")
+    )
+    return intake
+
+
+def test_start_run_pinned_by_user_lists_groups_and_new_groups(server, env):
+    intake = env["tmp"] / "pinned2.md"
+    intake.write_text(
+        FIXTURE.read_text().replace(
+            "platforms: [iOS]",
+            "platforms: [iOS]\ngroups:\n  - ref: G0142\n  - new:\n      name: Zzz Test Actor\n      description: d\n",
+        )
+    )
+    pinned = start(server, intake)["pinned_by_user"]
+    assert pinned["existing_groups"] == ["G0142"] and pinned["new_groups"] == ["Zzz Test Actor"]
+
+
+def test_agent_duplicates_of_user_asserted_items_are_dropped_not_e003(server, env):
+    from mitre_mapper.fetch import slug
+
+    ev = env["tmp"] / "ev"
+    ev.mkdir()
+    (ev / f"{slug(REF)}.txt").write_text("Confucius deployed Pegasus for iOS against targets.")
+    out = call(server, "start_run", intake_path=str(_pinned_intake(env)), fetch=False, evidence_dir=str(ev))
+    rid = out["run_id"]
+    prop = {
+        **GOOD,
+        "techniques": [tech("T1404"), tech("T1430")],
+        "groups": [{"group_id": "G0142", "quote": "Confucius deployed Pegasus for iOS", "source_name": REF}],
+    }
+    assert not call(server, "submit_proposal", run_id=rid, proposal=prop)["has_errors"]
+    res = call(server, "mint_delta", run_id=rid)
+    assert res["terminal_state"] == "minted", res
+    techs = {t["id"]: t["user_asserted"] for t in res["techniques"]["mobile-attack"]}
+    assert techs == {"T1404": True, "T1430": False}
+    assert [g["user_asserted"] for g in res["groups"]["mobile-attack"]] == [True]
+    (dd,) = [e for e in events(env, rid) if e["event"] == "merge" and e.get("kind") == "dedupe_user_asserted"]
+    assert dd["technique_ids"] == ["T1404"] and dd["group_ids"] == ["G0142"] and dd["domain"] == "mobile-attack"
+    assert not any(e["event"] == "lint_result" and e.get("phase") == "final" and
+                   any(f["severity"] == "ERROR" for f in e["findings"]) for e in events(env, rid))

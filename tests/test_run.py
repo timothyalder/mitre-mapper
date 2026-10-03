@@ -17,13 +17,14 @@ ROOT = Path(__file__).resolve().parents[1]
 DATASETS = ROOT / "datasets"
 FIXTURE = ROOT / "tests" / "fixtures" / "pegasus-ios.md"
 REF = "Test Fixture Reference"
+PROSE = "mitre-mapper intake description"  # the intake prose, as an evidence source
 
 
 def tech(tid: str, why: str = "Described in the intake prose.", **extra) -> dict:
     return {
         "technique_id": tid,
         "rationale": why,
-        "evidence": [{"source_name": REF, "quote": "collects location data"}],
+        "evidence": [{"source_name": PROSE, "quote": "collects location data"}],
         **extra,
     }
 
@@ -337,7 +338,9 @@ def test_no_judge_model_is_logged_once_and_skips(env, frozen):
 
 
 def test_mint_event_carries_the_final_mapping_and_run_md_renders_it(env, frozen):
-    rec = goj(env, ScriptedChatModel(script=[proposal_msg(GOOD)]))
+    cite_ref = [{"source_name": REF, "quote": "collects location data"}]  # real text of the frozen reference
+    good = proposal(*(tech(t, evidence=cite_ref) for t in ("T1430", "T1429", "T1409")))
+    rec = goj(env, ScriptedChatModel(script=[proposal_msg(good)]))
     (mint,) = of(events(env, rec), "mint")
     techs = mint["techniques"]["mobile-attack"]
     assert [t["id"] for t in techs] == ["T1430", "T1429", "T1409"]
@@ -448,3 +451,69 @@ def test_agent_technique_without_evidence_gets_e004_not_the_pool(env, frozen):
     rec = goj(env, model)
     assert rec.terminal_state == "minted" and rec.attempts == {"mobile-attack": 2}
     assert "E004" in rec.error_rule_ids
+
+
+def test_retry_message_includes_previous_proposal(env):
+    bad = proposal(tech("T1430", "Reads location."), tech("T1059", "Runs shell."))
+    model = ScriptedChatModel(script=[proposal_msg(bad), proposal_msg(GOOD)])
+    rec = go(env, model)
+    assert rec.terminal_state == "minted"
+    first = " ".join(str(m.content) for m in model.seen_messages[0])
+    second = " ".join(str(m.content) for m in model.seen_messages[1])
+    assert "Your previous proposal" not in first
+    assert "Your previous proposal" in second and "E002" in second
+    assert '"technique_id":"T1430"' in second and '"rationale":"Runs shell."' in second
+    assert "collects location data" in second and "user_asserted" not in second.split("Your previous proposal")[1]
+
+
+def test_first_message_lists_pinned_groups_and_new_groups(env):
+    model = ScriptedChatModel(script=[proposal_msg(GOOD)])
+    go(env, model, intake=group_intake(env, techniques="techniques: [T1404]\n"))
+    first = " ".join(str(m.content) for m in model.seen_messages[0])
+    assert "T1404" in first and "G0142" in first and "Zzz Test Actor" in first
+
+
+def test_agent_duplicates_of_pinned_items_are_deduped(env, frozen):
+    group = {"group_id": "G0142", "quote": "Confucius deployed Pegasus", "source_name": REF}
+    prop = proposal(tech("T1404"), tech("T1430"), groups=[group])
+    rec = goj(env, ScriptedChatModel(script=[proposal_msg(prop)]),
+              intake=group_intake(env, techniques="techniques: [T1404]\n"))
+    assert rec.terminal_state == "minted"
+    evs = events(env, rec)
+    (dd,) = [e for e in of(evs, "merge") if e.get("kind") == "dedupe_user_asserted"]
+    assert dd["technique_ids"] == ["T1404"] and dd["group_ids"] == ["G0142"]
+    delta = Delta.model_validate_json((env["runs_dir"] / rec.run_id / "delta.json").read_text())
+    keys = [(o["relationship_type"], o["source_ref"], o["target_ref"]) for o in delta.objects if o["type"] == "relationship"]
+    assert len(keys) == len(set(keys))
+    (mint,) = of(evs, "mint")
+    assert {t["id"]: t["user_asserted"] for t in mint["techniques"]["mobile-attack"]} == {"T1404": True, "T1430": False}
+
+
+def _delta(env, rec) -> Delta:
+    return Delta.model_validate_json((env["runs_dir"] / rec.run_id / "delta.json").read_text())
+
+
+def test_prose_citation_gets_its_own_accurate_reference(env):
+    pinned = group_intake(env, extra="", techniques="techniques: [T1404]\n")
+    rec = go(env, ScriptedChatModel(script=[proposal_msg(GOOD)]), intake=pinned)
+    assert rec.terminal_state == "minted"  # E005 clean with both intake references present
+    rels = [o for o in _delta(env, rec).objects if o["type"] == "relationship"]
+    by_marker = {}
+    for r in rels:
+        for ref in r["external_references"]:
+            by_marker.setdefault(ref["source_name"], set()).add(ref["description"])
+    assert by_marker[PROSE] == {"Intake description provided by the user for Pegasus for iOS."}
+    assert by_marker["mitre-mapper intake"] == {"Asserted by the user in the intake file for Pegasus for iOS."}
+    agent = [r for r in rels if f"(Citation: {PROSE})" in r["description"]]
+    assert len(agent) == 3 and all("(Citation: mitre-mapper intake)" not in r["description"] for r in agent)
+    asserted = [r for r in rels if "(Citation: mitre-mapper intake)" in r["description"]]
+    assert len(asserted) == 1
+
+
+def test_e012_failure_triggers_a_retry_with_details(env):
+    fake = proposal(tech("T1430", evidence=[{"source_name": PROSE, "quote": "steals the moon"}]))
+    model = ScriptedChatModel(script=[proposal_msg(fake), proposal_msg(GOOD)])
+    rec = go(env, model)
+    assert rec.terminal_state == "minted" and "E012" in rec.error_rule_ids
+    second = " ".join(str(m.content) for m in model.seen_messages[1])
+    assert "E012" in second and "quote_not_found" in second

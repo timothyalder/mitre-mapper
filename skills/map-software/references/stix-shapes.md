@@ -41,6 +41,16 @@ external_references: [the reference named by source_name]
 
 The quote is published as-is; it must name both the software and the group (E011).
 
+## Intake sources
+
+Two distinct references, so `(Citation: …)` markers stay unambiguous:
+
+- `mitre-mapper intake`: cites user-asserted items. Description "Asserted by the user in the
+  intake file for <software>." You never use this name.
+- `mitre-mapper intake description`: cite it as an evidence `source_name` when you quote the
+  intake prose. Description "Intake description provided by the user for <software>." The quote
+  must appear verbatim in the intake prose (E012).
+
 ## User-asserted items (added by the tool, cited to `mitre-mapper intake`)
 
 - Pinned `techniques` in the intake: software-uses-technique relationships.

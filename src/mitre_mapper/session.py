@@ -68,6 +68,61 @@ def proposal_ids(proposal: MappingProposal) -> tuple[set[str], set[str]]:
     return {t.technique_id for t in proposal.techniques}, {g.group_id for g in proposal.groups}
 
 
+def pinned_items(spec: IntakeSpec) -> dict[str, Any]:
+    """What the user pinned in the intake (added by the tool, never to be re-proposed).
+
+    The ONE source for both surfaces: MCP ``start_run``'s ``pinned_by_user`` and the LangChain
+    first message (:func:`render_pinned`).
+    """
+    return {
+        "techniques": list(spec.techniques),
+        "existing_groups": [g.ref for g in spec.groups if g.ref],
+        "new_groups": [g.new.name for g in spec.groups if g.new],
+        "note": "These are added by the tool (never judged); do not repeat them in proposals.",
+    }
+
+
+def render_pinned(spec: IntakeSpec) -> str | None:
+    """Prose form of :func:`pinned_items` for a model prompt; None when nothing is pinned."""
+    pinned = pinned_items(spec)
+    lines = [
+        f"- {label}: {', '.join(pinned[key])}"
+        for key, label in (
+            ("techniques", "techniques"),
+            ("existing_groups", "existing ATT&CK groups"),
+            ("new_groups", "new groups defined by the user"),
+        )
+        if pinned[key]
+    ]
+    if not lines:
+        return None
+    return "The user already pinned these items. " + pinned["note"] + "\n" + "\n".join(lines)
+
+
+def render_previous_proposal(prev: MappingProposal) -> str:
+    """Compact JSON of the agent-proposed items of ``prev`` (``user_asserted`` items excluded)."""
+    data = {
+        "techniques": [
+            t.model_dump(mode="json", exclude={"user_asserted"}) for t in prev.techniques if not t.user_asserted
+        ],
+        "groups": [g.model_dump(mode="json", exclude={"user_asserted"}) for g in prev.groups if not g.user_asserted],
+        "unmatched_actors": [a.model_dump(mode="json") for a in prev.unmatched_actors],
+        "declined": prev.declined,
+        "decline_rationale": prev.decline_rationale,
+    }
+    return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+
+
+def render_retry_message(feedback: str, prev: MappingProposal | None) -> str:
+    """Feedback plus the previous proposal, so a retry can keep every item the feedback did not name."""
+    if prev is None:
+        return feedback
+    return (
+        f"{feedback}\n\nYour previous proposal (agent-proposed items only). Keep every item the "
+        f"feedback does not name; change only what it names:\n{render_previous_proposal(prev)}"
+    )
+
+
 def force_agent_items_unasserted(proposal: MappingProposal, domain: str) -> MappingProposal:
     """SECURITY: only intake-derived items may carry ``user_asserted`` (they skip the judge).
 
@@ -243,6 +298,45 @@ def user_asserted_items(
     return out
 
 
+def _drop_asserted_duplicates(
+    log: RunLog, domain: str, proposal: MappingProposal, store: AttackStore
+) -> MappingProposal:
+    """Drop agent-proposed techniques/groups that duplicate a user-asserted one (the user's copy wins).
+
+    Techniques compare by resolved object (a revoked id and its successor are the same technique,
+    as in lint E003), so the merge never fails E003 over an agent's overlap with a pin.
+    """
+    ds = store.domain(domain)
+
+    def tech_key(tid: str) -> str:
+        obj = ds.lookup(tid, "attack-pattern").obj
+        return obj["id"] if obj else tid
+
+    def group_key(gid: str) -> str:
+        obj = ds.lookup(gid, "intrusion-set").obj
+        return obj["id"] if obj else gid
+
+    asserted_t = {tech_key(t.technique_id) for t in proposal.techniques if t.user_asserted}
+    asserted_g = {group_key(g.group_id) for g in proposal.groups if g.user_asserted}
+    drop_t = [t for t in proposal.techniques if not t.user_asserted and tech_key(t.technique_id) in asserted_t]
+    drop_g = [g for g in proposal.groups if not g.user_asserted and group_key(g.group_id) in asserted_g]
+    if not (drop_t or drop_g):
+        return proposal
+    log.event(
+        "merge",
+        kind="dedupe_user_asserted",
+        domain=domain,
+        technique_ids=sorted({t.technique_id for t in drop_t}),
+        group_ids=sorted({g.group_id for g in drop_g}),
+    )
+    return proposal.model_copy(
+        update={
+            "techniques": [t for t in proposal.techniques if not any(t is d for d in drop_t)],
+            "groups": [g for g in proposal.groups if not any(g is d for d in drop_g)],
+        }
+    )
+
+
 def mint_payload(
     live: dict[str, MappingProposal], result: MintResult, store: AttackStore
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
@@ -345,6 +439,9 @@ def complete_mapping(
             log.event("user_asserted", kind="intake", domain=domain, techniques=[t.technique_id for t in techs])
         for g in groups:
             log.event("user_asserted", kind="group_ref", domain=domain, group_id=g.group_id)
+    for domain, (techs, groups) in asserted.items():
+        if (techs or groups) and domain in accepted:
+            accepted[domain] = _drop_asserted_duplicates(log, domain, accepted[domain], store)
     new_groups = [g.new for g in spec.groups if g.new is not None]
     for new in new_groups:
         log.event("user_asserted", kind="new_group", name=new.name, aliases=new.aliases, techniques=new.techniques)

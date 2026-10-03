@@ -11,6 +11,9 @@ from pydantic import ValidationError
 from .models import Domain, ExternalReference, IntakeSpec
 
 INTAKE_SOURCE = "mitre-mapper intake"
+# Agent quotes of the intake prose cite this source (distinct from INTAKE_SOURCE, which cites
+# user-asserted items), so a (Citation: X) marker is unambiguous when both occur (E005).
+INTAKE_PROSE_SOURCE = "mitre-mapper intake description"
 
 _MOBILE_PLATFORMS = {"ios", "android"}
 _ICS_PLATFORMS = {

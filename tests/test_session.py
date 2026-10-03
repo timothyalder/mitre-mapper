@@ -19,10 +19,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DATASETS = ROOT / "datasets"
 FIXTURE = ROOT / "tests" / "fixtures" / "pegasus-ios.md"
 REF = "Test Fixture Reference"
+PROSE = "mitre-mapper intake description"  # the intake prose, as an evidence source
 
 
 def tech(tid):
-    return {"technique_id": tid, "rationale": "r", "evidence": [{"source_name": REF, "quote": "collects location data"}]}
+    return {"technique_id": tid, "rationale": "r", "evidence": [{"source_name": PROSE, "quote": "collects location data"}]}
 
 
 @pytest.fixture
@@ -93,3 +94,17 @@ def test_stdio_entry_point_serves_all_tools(tmp_path):
     assert {"start_run", "submit_proposal", "mint_delta", "end_run"} <= tools
     assert started["terminal_state"] == "error"
     assert read_index(tmp_path / "runs")[0].surface == "mcp"
+
+
+def test_render_helpers_share_pinned_items_and_previous_proposal(sess):
+    spec = sess.spec.model_copy(update={"techniques": ["T1404"]})
+    pinned = S.pinned_items(spec)
+    assert pinned["techniques"] == ["T1404"] and pinned["existing_groups"] == [] and pinned["new_groups"] == []
+    assert "T1404" in S.render_pinned(spec) and S.render_pinned(sess.spec) is None
+    prev = MappingProposal.model_validate({
+        "domain": "mobile-attack",
+        "techniques": [tech("T1430"), {**tech("T1404"), "user_asserted": True}],
+    })
+    msg = S.render_retry_message("FEEDBACK", prev)
+    assert msg.startswith("FEEDBACK") and '"technique_id":"T1430"' in msg and "T1404" not in msg
+    assert S.render_retry_message("FEEDBACK", None) == "FEEDBACK"

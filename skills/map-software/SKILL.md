@@ -18,7 +18,9 @@ supported beats a long one.
     ("X can read the device's call log."). It is published as the relationship description. Do not
     write `(Citation: …)` markers; they are added from your evidence.
   - `evidence`: at least one quote. `source_name` must be exactly a reference name from the task, or
-    `mitre-mapper intake` for a sentence from the intake prose.
+    `mitre-mapper intake description` for a sentence from the intake prose. Never use
+    `mitre-mapper intake` (that name is for the user's pinned items). The quote must be copied
+    verbatim from the source you name, or lint E012 rejects it.
 - `groups`: `[{group_id, quote, source_name}]`, linking existing ATT&CK groups (`G####`) only.
 - `unmatched_actors`: `[{actor, quote, source_name}]`, for actors the evidence ties to the software
   that have no ATT&CK group.
