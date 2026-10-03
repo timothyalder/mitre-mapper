@@ -165,3 +165,29 @@ def test_verdict_failed_items():
         ],
     )
     assert [i.name for i in v.failed_items] == ["b"]
+
+
+def test_group_mapping_quote_required_unless_user_asserted():
+    from mitre_mapper.models import GroupMapping
+
+    with pytest.raises(ValidationError):
+        GroupMapping(group_id="G0142", quote="", source_name="x")
+    with pytest.raises(ValidationError):
+        GroupMapping(group_id="G0142", quote="q", source_name="")
+    assert GroupMapping(group_id="G0142", user_asserted=True).quote == ""
+    assert GroupMapping(group_id="G0142", quote="q", source_name="s").source_name == "s"
+
+
+def test_unmatched_actors_on_proposal():
+    from mitre_mapper.models import MappingProposal, UnmatchedActor
+
+    p = MappingProposal(
+        domain="mobile-attack",
+        unmatched_actors=[{"actor": "APT-X", "quote": "APT-X used it", "source_name": "blog"}],
+    )
+    assert isinstance(p.unmatched_actors[0], UnmatchedActor)
+    assert MappingProposal(domain="mobile-attack").unmatched_actors == []
+    with pytest.raises(ValidationError):
+        UnmatchedActor(actor="", quote="q", source_name="s")
+    with pytest.raises(ValidationError):
+        UnmatchedActor(actor="a", quote="q", source_name="s", extra=1)

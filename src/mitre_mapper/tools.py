@@ -6,7 +6,8 @@ wrapper (:func:`_logged`) so MCP-driven and LangChain-driven runs log
 identically: a full payload under ``calls/<n>.json`` plus a ``tool_call``
 event (``call_id``, ``sha256``, ``ok``); search tools also emit ``search``
 (``query``, ``k``, ``returned_ids``, ``call_id``) and revoked lookups emit
-``revoked_redirect``.
+``revoked_redirect``. A tool body may set ``call.summary`` (e.g. ``returned_chars`` for
+``get_evidence``); it is logged on the ``tool_call`` event as ``summary``.
 
 Tools never raise into the agent: any failure becomes ``{"error": "..."}``.
 No LangChain imports here (acceptance criterion 13).
@@ -62,6 +63,7 @@ class _Call:
 
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, Any]]] = []
+        self.summary: dict[str, Any] = {}
 
     def emit(self, name: str, **fields: Any) -> None:
         self.events.append((name, fields))
@@ -83,7 +85,10 @@ def _logged(
         ok = "error" not in result
         try:
             call_id, digest = ctx.log.write_call(tool, {"args": args, "result": result})
-            ctx.log.event("tool_call", tool=tool, args=args, call_id=call_id, sha256=digest, ok=ok)
+            extra = {"summary": call.summary} if call.summary else {}
+            ctx.log.event(
+                "tool_call", tool=tool, args=args, call_id=call_id, sha256=digest, ok=ok, **extra
+            )
             for name, fields in call.events:
                 ctx.log.event(name, call_id=call_id, **fields)
         except Exception as exc:  # noqa: BLE001 - logging failure must not kill the agent
@@ -204,8 +209,17 @@ def get_technique(ctx: ToolContext, call: _Call, attack_id: str) -> dict[str, An
 
 @_logged
 def get_group(ctx: ToolContext, call: _Call, attack_id: str) -> dict[str, Any]:
-    """Fetch one group by ATT&CK id."""
-    return _do_get(ctx, call, "group", attack_id, ("intrusion-set",))
+    """Fetch one group by ATT&CK id (e.g. G0046) or by name/alias (e.g. "Carbon Spider")."""
+    out = _do_get(ctx, call, "group", attack_id, ("intrusion-set",))
+    if "error" not in out:
+        return out
+    store = ctx.domain_store
+    obj = store.resolve_group(attack_id)
+    if obj is None:
+        return {"error": f"{attack_id} is not an active group id, name or alias in {ctx.domain}"}
+    out = _FORMATTERS["group"](store, obj, _DESC_LONG)
+    out["matched_by"] = "name_or_alias"
+    return out
 
 
 @_logged
@@ -226,16 +240,41 @@ def get_software_techniques(ctx: ToolContext, call: _Call, attack_id: str) -> di
     return {"software": attack_id, "techniques": rows}
 
 
+EVIDENCE_WINDOW = 8_000
+EVIDENCE_WINDOW_MAX = 20_000
+
+
 @_logged
-def get_evidence(ctx: ToolContext, call: _Call, source_name: str) -> dict[str, Any]:
-    """Return fetched evidence text for a reference ``source_name``."""
+def get_evidence(
+    ctx: ToolContext,
+    call: _Call,
+    source_name: str,
+    offset: int = 0,
+    max_chars: int = EVIDENCE_WINDOW,
+) -> dict[str, Any]:
+    """Return a window of the fetched evidence text for a reference ``source_name``.
+
+    Long evidence is paged: pass the returned ``next_offset`` as ``offset`` to continue.
+    """
     text = ctx.evidence.get(source_name)
     if text is None:
         return {
             "error": f"no evidence available for {source_name!r}",
             "available": sorted(ctx.evidence),
         }
-    return {"source_name": source_name, "text": text}
+    offset = max(0, int(offset))
+    window = max(1, min(int(max_chars), EVIDENCE_WINDOW_MAX))
+    chunk = text[offset : offset + window]
+    end = offset + len(chunk)
+    call.summary = {"total_chars": len(text), "offset": offset, "returned_chars": len(chunk)}
+    return {
+        "source_name": source_name,
+        "text": chunk,
+        "offset": offset,
+        "returned_chars": len(chunk),
+        "total_chars": len(text),
+        "next_offset": end if end < len(text) else None,
+    }
 
 
 @_logged
@@ -277,6 +316,7 @@ def preview_lint(
             objects=preview.by_domain.get(domain, []),
             allocations=allocations,
             evidence=evidence,
+            spec=spec,
         )
     )
 

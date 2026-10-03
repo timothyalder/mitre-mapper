@@ -4,12 +4,14 @@ Thin orchestration only. Lint rules, STIX shapes, id policy and event
 definitions live in the core; this module decides what to call and in what order,
 and guarantees the run always finalizes (``runlog.run_context``).
 
-Wave 2 slice: no evidence fetch (``evidence == {}``) and no judge. The judge hook
-is marked ``JUDGE HOOK`` below.
+Per domain: agent attempt -> ``group_quote_check`` logging -> lint -> (lint-clean only)
+the judge, exactly once -> accept or retry with feedback. Evidence is gathered once, before
+the domain loop, and handed to the tools, lint and the judge as ``{source_name: text}``.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,25 +22,33 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 from mitre_mapper.agent import AgentOutputError, build_agent, invoke_agent
 from mitre_mapper.allocations import Allocations
+from mitre_mapper.fetch import gather_evidence
+from mitre_mapper.groups import check_group_quote
 from mitre_mapper.intake import IntakeError, parse_intake, resolve_domains
+from mitre_mapper.judge import JudgeOutputError, JudgeResult, judge
 from mitre_mapper.lint import has_errors
-from mitre_mapper.mint import build_objects
+from mitre_mapper.mint import MintResult, build_objects
 from mitre_mapper.models import (
     Delta,
+    ExternalReference,
     GroupMapping,
     IntakeSpec,
     LintFinding,
     MappingProposal,
+    RubricItem,
     RunRecord,
     Severity,
     TechniqueMapping,
+    Verdict,
 )
-from mitre_mapper.runlog import Budget, RunLog, run_context
+from mitre_mapper.runlog import Budget, BudgetExhausted, ProviderError, RunLog, run_context
 from mitre_mapper.store import AttackStore, get_store
 from mitre_mapper.tools import REPO_ROOT, ToolContext, now_stix, preview_lint
 
 DEFAULT_SKILL_PATH = REPO_ROOT / "skills" / "map-software" / "SKILL.md"
 INTAKE_SOURCE = "mitre-mapper intake"
+DEFAULT_CACHE_DIR = REPO_ROOT / ".cache" / "fetch"
+JUDGE_OUTPUT_INVALID = "judge_output_invalid"
 
 
 def load_system_prompt(skill_path: Path = DEFAULT_SKILL_PATH) -> str:
@@ -79,6 +89,16 @@ def render_feedback(findings: Sequence[LintFinding]) -> str:
         target = f" [{f.target}]" if f.target else ""
         extra = f" details={json.dumps(f.details, default=str)}" if f.details else ""
         lines.append(f"- {f.rule_id}{target}: {f.message}{extra}")
+    return "\n".join(lines)
+
+
+def render_judge_feedback(verdict: Verdict) -> str:
+    """Render the judge's FAILED rubric items as a retry message for the agent."""
+    lines = [
+        "An independent reviewer rejected your proposal. Address every failed item below, "
+        "then call MappingProposal again:"
+    ]
+    lines += [f"- {i.name}: {i.rationale}" for i in verdict.failed_items]
     return "\n".join(lines)
 
 
@@ -148,6 +168,52 @@ def _dataset_manifest(datasets_dir: Path) -> dict[str, Any]:
         return {}
 
 
+def _run_judge(
+    *,
+    log: RunLog,
+    judge_model: str | BaseChatModel,
+    proposal: MappingProposal,
+    spec: IntakeSpec,
+    evidence: dict[str, str],
+    domain: str,
+    attempt: int,
+) -> Verdict:
+    """Call the judge once, log ``judge_verdict`` + ``verdict_<n>.json``, charge the budget.
+
+    ``JudgeOutputError`` becomes a failed verdict (item ``judge_output_invalid``);
+    ``ProviderError`` propagates (the run finalizes as ``provider_error``).
+    """
+    result: JudgeResult | None = None
+    spent: tuple[int, int, float] = (0, 0, 0.0)
+    try:
+        result = judge(proposal, spec, evidence, judge_model)
+    except JudgeOutputError as exc:
+        verdict = Verdict(
+            approved=False,
+            items=[RubricItem(name=JUDGE_OUTPUT_INVALID, passed=False, rationale=str(exc))],
+            summary="judge output could not be parsed",
+        )
+        sha, spent = exc.prompt_sha256, (exc.tokens_in, exc.tokens_out, exc.latency_s)
+    except ProviderError:
+        with contextlib.suppress(BudgetExhausted):  # the call happened; don't mask the real error
+            log.model_call(0, 0, 0.0)
+        raise
+    else:
+        verdict, sha = result.verdict, result.prompt_sha256
+        spent = (result.tokens_in, result.tokens_out, result.latency_s)
+    items = [i.model_dump(mode="json") for i in verdict.items]
+    log.write_artifact(
+        f"{domain}/verdict_{attempt}.json",
+        {**verdict.model_dump(mode="json"), "prompt_sha256": sha, "tokens": {"in": spent[0], "out": spent[1]},
+         "latency_s": round(spent[2], 3)},
+    )
+    log.event("judge_verdict", domain=domain, attempt=attempt, approved=verdict.approved, items=items,
+              prompt_sha256=sha)
+    if result is None or result.tokens_in or result.tokens_out or result.latency_s:
+        log.model_call(*spent)  # after logging, so a BudgetExhausted still leaves the verdict
+    return verdict
+
+
 def _attempt_domain(
     *,
     log: RunLog,
@@ -159,19 +225,27 @@ def _attempt_domain(
     domain: str,
     max_attempts: int,
     created: str,
+    judge_model: str | BaseChatModel | None = None,
 ) -> tuple[str, MappingProposal | None]:
-    """Run the attempts loop for one domain. Returns (``accepted|declined|lint_failed``, proposal)."""
+    """Run the attempts loop for one domain.
+
+    Returns (``accepted|declined|lint_failed|judge_rejected``, proposal). The terminal
+    failure is ``judge_rejected`` only when the last failed attempt was a judge rejection.
+    """
     prev: MappingProposal | None = None
     feedback: str | None = None
     retry_reason: str | None = None
     last_proposal: MappingProposal | None = None
+    last_failure = "lint_failed"
+    evidence = ctx.evidence
     for attempt in range(1, max_attempts + 1):
         ctx.returned_ids.clear()
         try:
-            raw = invoke_agent(agent, [{"role": "user", "content": _first_message(spec, domain, ctx.evidence, feedback)}])
+            raw = invoke_agent(agent, [{"role": "user", "content": _first_message(spec, domain, evidence, feedback)}])
         except AgentOutputError as exc:
             log.event("retry", domain=domain, attempt=attempt, reason=f"no_structured_output: {exc}", added=[], removed=[])
             feedback = "You did not call the MappingProposal tool. Finish by calling it."
+            last_failure = "lint_failed"
             continue
         proposal = _force_agent_items_unasserted(raw, domain)
         last_proposal = proposal
@@ -197,7 +271,20 @@ def _attempt_domain(
                 added=sorted((tech_ids | group_ids) - (p_t | p_g)),
                 removed=sorted((p_t | p_g) - (tech_ids | group_ids)),
             )
-        findings = preview_lint(spec, proposal, store, allocations, ctx.evidence, created)
+        for gm in proposal.groups:
+            check = check_group_quote(gm, spec, store.domain(domain), evidence)
+            log.event(
+                "group_quote_check",
+                domain=domain,
+                attempt=attempt,
+                group_id=check.group_id,
+                passed=check.passed,
+                reason=check.reason,
+                source=check.source_name,
+                software_aliases_matched=check.software_aliases_matched,
+                group_aliases_matched=check.group_aliases_matched,
+            )
+        findings = preview_lint(spec, proposal, store, allocations, evidence, created)
         _write_lint(log, domain, f"lint_{attempt}", findings)
         log.event(
             "lint_result",
@@ -208,30 +295,128 @@ def _attempt_domain(
         if has_errors(findings):
             prev = proposal
             feedback = render_feedback(findings)
+            last_failure = "lint_failed"
             retry_reason = "lint_errors: " + ",".join(
                 sorted({f.rule_id for f in findings if f.severity == Severity.ERROR})
             )
             continue
-        # JUDGE HOOK (Wave 3D): for a lint-clean, non-declined proposal call
-        # ``judge(proposal, intake, evidence)`` exactly once, write verdict_<n>.json, emit
-        # ``judge_verdict``; on rejection set ``feedback`` and ``continue``.
+        if judge_model is not None:  # exactly one judge call per lint-clean attempt (D6)
+            verdict = _run_judge(
+                log=log, judge_model=judge_model, proposal=proposal, spec=spec, evidence=evidence,
+                domain=domain, attempt=attempt,
+            )
+            if not verdict.approved:
+                prev = proposal
+                feedback = render_judge_feedback(verdict)
+                last_failure = "judge_rejected"
+                failed = [i.name for i in verdict.failed_items]
+                retry_reason = (
+                    JUDGE_OUTPUT_INVALID
+                    if failed == [JUDGE_OUTPUT_INVALID]
+                    else "judge_rejected: " + ",".join(sorted(failed))
+                )
+                continue
         return ("declined" if proposal.declined else "accepted"), proposal
-    return "lint_failed", last_proposal
+    return last_failure, last_proposal
+
+
+def _gather(
+    log: RunLog,
+    spec: IntakeSpec,
+    *,
+    cache_dir: Path,
+    evidence_dir: Path | None,
+    fetch: bool,
+    use_cache: bool,
+    timeout: float,
+) -> dict[str, str]:
+    """Fetch intake + new-group references (never raises); keep only ok text."""
+    refs: dict[str, ExternalReference] = {}
+    for ref in [*spec.references, *(r for g in spec.groups if g.new for r in g.new.references)]:
+        refs.setdefault(ref.source_name, ref)
+    results = gather_evidence(
+        list(refs.values()),
+        log=log,
+        cache_dir=cache_dir,
+        run_evidence_dir=log.run_dir / "evidence",
+        evidence_dir=evidence_dir,
+        fetch=fetch,
+        use_cache=use_cache,
+        timeout=timeout,
+    )
+    return {name: r.text for name, r in results.items() if r.ok and r.text is not None}
+
+
+def _mint_payload(
+    live: dict[str, MappingProposal], result: MintResult, store: AttackStore
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    """The final mapping for the ``mint`` event: techniques and groups per domain."""
+    techniques: dict[str, list[dict[str, Any]]] = {}
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for domain, proposal in sorted(live.items()):
+        ds = store.domain(domain)
+        techniques[domain] = []
+        for t in proposal.techniques:
+            obj = ds.lookup(t.technique_id, "attack-pattern").obj
+            sources = (
+                [INTAKE_SOURCE]
+                if t.user_asserted
+                else list(dict.fromkeys(e.source_name for e in t.evidence))
+            )
+            techniques[domain].append(
+                {
+                    "id": t.technique_id,
+                    "name": obj.get("name") if obj else None,
+                    "user_asserted": t.user_asserted,
+                    "sources": sources,
+                }
+            )
+        groups[domain] = []
+        for g in proposal.groups:
+            obj = ds.lookup(g.group_id, "intrusion-set").obj
+            groups[domain].append(
+                {
+                    "id": g.group_id,
+                    "name": obj.get("name") if obj else None,
+                    "user_asserted": g.user_asserted,
+                    "kind": "existing",
+                }
+            )
+        for o in result.by_domain.get(domain, []):
+            if o.get("type") == "intrusion-set":
+                groups[domain].append(
+                    {
+                        "id": o["external_references"][0]["external_id"],
+                        "name": o.get("name"),
+                        "user_asserted": True,
+                        "kind": "new",
+                    }
+                )
+    return techniques, groups
 
 
 def map_software(
     intake_path: Path | str,
     *,
     model: str | BaseChatModel,
-    judge_model: str | None = None,
+    judge_model: str | BaseChatModel | None = None,
     runs_dir: Path | str,
     datasets_dir: Path | str,
     max_attempts: int = 3,
     max_model_calls: int = 60,
     allocations_path: Path | str | None = None,
     skill_path: Path | str = DEFAULT_SKILL_PATH,
+    fetch: bool = True,
+    evidence_dir: Path | str | None = None,
+    use_cache: bool = True,
+    fetch_timeout: float = 20.0,
+    cache_dir: Path | str | None = None,
 ) -> RunRecord:
-    """Map one intake file to a delta. Always returns the finalized ``RunRecord``."""
+    """Map one intake file to a delta. Always returns the finalized ``RunRecord``.
+
+    ``judge_model=None`` skips the judge (logged once as ``merge``/``judge_config``).
+    ``evidence_dir`` is frozen mode: evidence is read only from there, never the network.
+    """
     intake_path = Path(intake_path)
     datasets_dir = Path(datasets_dir)
     allocations_path = Path(allocations_path or datasets_dir / "allocations.json")
@@ -253,7 +438,7 @@ def map_software(
         software_name=spec.name if spec else intake_path.stem,
         intake_text_or_path=intake_text,
         model=_model_name(model),
-        judge_model=judge_model,
+        judge_model=_model_name(judge_model) if judge_model is not None else None,
         prompt_text=system_prompt,
         budget=budget,
         manifest_path=datasets_dir / "MANIFEST.json",
@@ -265,13 +450,27 @@ def map_software(
 
         domains: list[str] = list(resolve_domains(spec))
         log.event("domain_resolved", domains=domains)
-        evidence: dict[str, str] = {}  # Wave 3A adds gather_evidence(); never raises.
+        evidence = _gather(
+            log,
+            spec,
+            cache_dir=Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR,
+            evidence_dir=Path(evidence_dir) if evidence_dir else None,
+            fetch=fetch,
+            use_cache=use_cache,
+            timeout=fetch_timeout,
+        )
+        log.event(
+            "merge",
+            kind="judge_config",
+            judge=_model_name(judge_model) if judge_model is not None else None,
+            note=None if judge_model is not None else "no judge model configured; judge skipped",
+        )
         store = get_store(datasets_dir)
         allocations = Allocations(allocations_path)
         created = now_stix()
 
         accepted: dict[str, MappingProposal] = {}
-        failed = False
+        failed_state: str | None = None
         for domain in domains:
             ctx = ToolContext(
                 log=log, store=store, domain=domain, spec=spec, evidence=evidence, allocations=allocations
@@ -279,23 +478,34 @@ def map_software(
             agent = build_agent(model, ctx, system_prompt)
             outcome, proposal = _attempt_domain(
                 log=log, ctx=ctx, agent=agent, spec=spec, store=store, allocations=allocations,
-                domain=domain, max_attempts=max_attempts, created=created,
+                domain=domain, max_attempts=max_attempts, created=created, judge_model=judge_model,
             )
-            if outcome == "accepted" and proposal is not None:
-                accepted[domain] = proposal
-            elif outcome == "lint_failed":
-                failed = True
+            if outcome in ("accepted", "declined") and proposal is not None:
+                accepted[domain] = proposal  # a declined one is kept only if user-asserted items revive it
+                for actor in proposal.unmatched_actors:
+                    log.event(
+                        "unmatched_actor",
+                        domain=domain,
+                        actor=actor.actor,
+                        quote=actor.quote,
+                        source_name=actor.source_name,
+                    )
+            else:
+                failed_state = outcome
                 break
-            elif outcome == "declined" and proposal is not None:
-                accepted[domain] = proposal  # kept only if user-asserted items revive it
 
-        if failed:
-            log.finalize("lint_failed", error="attempts exhausted with lint ERRORs")
+        if failed_state is not None:
+            log.finalize(
+                failed_state,
+                error="attempts exhausted with lint ERRORs"
+                if failed_state == "lint_failed"
+                else "attempts exhausted; the judge rejected the last lint-clean proposal",
+            )
             return _record(runs_dir, log)
 
         # User-asserted items: always included, flagged, never judged.
-        intake_ref = INTAKE_SOURCE
-        asserted = _user_asserted_items(spec, list(accepted) or domains, store, intake_ref)
+        targets = list(accepted) or domains
+        asserted = _user_asserted_items(spec, targets, store, INTAKE_SOURCE)
         for domain, (techs, groups) in asserted.items():
             if not (techs or groups):
                 continue
@@ -308,16 +518,23 @@ def map_software(
                     "groups": [*base.groups, *groups],
                 }
             )
+            if techs:
+                log.event(
+                    "user_asserted", kind="intake", domain=domain, techniques=[t.technique_id for t in techs]
+                )
+            for g in groups:
+                log.event("user_asserted", kind="group_ref", domain=domain, group_id=g.group_id)
+        new_groups = [g.new for g in spec.groups if g.new is not None]
+        for new in new_groups:
             log.event(
-                "user_asserted",
-                kind="intake",
-                domain=domain,
-                techniques=[t.technique_id for t in techs],
-                groups=[g.group_id for g in groups],
+                "user_asserted", kind="new_group", name=new.name, aliases=new.aliases, techniques=new.techniques
             )
-        for g in spec.groups:
-            if g.new is not None:
-                log.event("user_asserted", kind="new_group", name=g.new.name, note="minting deferred to Wave 3C")
+        if new_groups and all(p.declined for p in accepted.values()):
+            # User-defined groups are content the agent's decline cannot veto: keep one domain
+            # live so they are minted (final lint E001 still applies to the software itself).
+            first = targets[0]
+            base = accepted.get(first) or MappingProposal(domain=first)  # type: ignore[arg-type]
+            accepted[first] = base.model_copy(update={"declined": False, "decline_rationale": None})
 
         live = {d: p for d, p in accepted.items() if not p.declined}
         if not live:
@@ -352,11 +569,14 @@ def map_software(
         names = {o["id"]: o.get("name") for o in result.objects}
         for attack_id, stix_id in sorted(result.allocations.items()):
             log.event("allocation", attack_id=attack_id, name=names.get(stix_id), stix_id=stix_id)
+        mint_techniques, mint_groups = _mint_payload(live, result, store)
         log.event(
             "mint",
             software_id=result.software["id"],
             n_objects=len(result.objects),
             domains=sorted(live),
+            techniques=mint_techniques,
+            groups=mint_groups,
         )
         delta = Delta(
             run_id=log.run_id,

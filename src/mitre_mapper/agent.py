@@ -105,7 +105,7 @@ def _langchain_tools(ctx: T.ToolContext) -> list[StructuredTool]:
         return T.search_groups(ctx, query=query, k=k)
 
     def get_group(attack_id: str) -> dict[str, Any]:
-        """Get one existing ATT&CK group by id, e.g. G0035."""
+        """Get one existing ATT&CK group by id (G0035) or by name/alias (Carbon Spider)."""
         return T.get_group(ctx, attack_id=attack_id)
 
     def search_software(query: str, k: int = 10) -> dict[str, Any]:
@@ -120,9 +120,12 @@ def _langchain_tools(ctx: T.ToolContext) -> list[StructuredTool]:
         """List techniques ATT&CK maps for an existing software id."""
         return T.get_software_techniques(ctx, attack_id=attack_id)
 
-    def get_evidence(source_name: str) -> dict[str, Any]:
-        """Return fetched evidence text for an intake reference source_name."""
-        return T.get_evidence(ctx, source_name=source_name)
+    def get_evidence(source_name: str, offset: int = 0, max_chars: int = 8000) -> dict[str, Any]:
+        """Return a window of the fetched evidence text for a reference source_name.
+
+        Long evidence is paged: use the returned next_offset as offset to read on.
+        """
+        return T.get_evidence(ctx, source_name=source_name, offset=offset, max_chars=max_chars)
 
     def read_reference(name: str) -> dict[str, Any]:
         """Read a reference document: linter-rules.md or stix-shapes.md."""

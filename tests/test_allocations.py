@@ -55,3 +55,31 @@ def test_concurrent_allocations_get_distinct_ids(tmp_path):
     for t in threads:
         t.join()
     assert sorted(ids) == [f"SX{n:04d}" for n in range(1, 9)]
+
+
+def test_peek_many_hands_out_consecutive_ids_without_writing(tmp_path):
+    path = tmp_path / "a.json"
+    alloc = Allocations(path)
+    alloc.allocate("group", "intrusion-set--a", "A", "r")
+    out = alloc.peek_many("group", ["intrusion-set--b", "intrusion-set--a", "intrusion-set--c"])
+    assert out == {
+        "intrusion-set--a": "GX0001",
+        "intrusion-set--b": "GX0002",
+        "intrusion-set--c": "GX0003",
+    }
+    assert alloc.peek("group", "intrusion-set--b") == "GX0002"
+    assert "GX0002" not in path.read_text()
+
+
+def test_definition_sha256_is_stored_once_and_optional(tmp_path):
+    alloc = Allocations(tmp_path / "a.json")
+    alloc.allocate("group", "intrusion-set--g", "G", "run1", definition_sha256="abc")
+    alloc.allocate("group", "intrusion-set--g", "G", "run2", definition_sha256="def")
+    rec = alloc.record_for("group", "intrusion-set--g")
+    assert rec == {
+        "attack_id": "GX0001", "stix_id": "intrusion-set--g", "name": "G",
+        "first_run": "run1", "definition_sha256": "abc",
+    }
+    alloc.allocate("software", "malware--a", "A", "r")
+    assert "definition_sha256" not in alloc.lookup("SX0001")
+    assert alloc.record_for("group", "intrusion-set--zzz") is None

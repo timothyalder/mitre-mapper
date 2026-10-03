@@ -88,6 +88,81 @@ def test_get_evidence(ctx):
     assert "error" in miss and miss["available"] == ["Src"]
 
 
+def test_get_evidence_pages_long_text_and_logs_returned_length(ctx):
+    ctx.evidence["Long"] = "".join(chr(97 + i % 26) for i in range(2500))
+    first = T.get_evidence(ctx, source_name="Long", max_chars=1000)
+    assert first["text"] == ctx.evidence["Long"][:1000]
+    assert (first["returned_chars"], first["total_chars"], first["next_offset"]) == (1000, 2500, 1000)
+    last = T.get_evidence(ctx, source_name="Long", offset=2000, max_chars=1000)
+    assert last["text"] == ctx.evidence["Long"][2000:] and last["next_offset"] is None
+    calls = [e for e in events(ctx, "tool_call") if e["tool"] == "get_evidence"]
+    assert [c["summary"]["returned_chars"] for c in calls] == [1000, 500]
+    assert calls[0]["args"]["max_chars"] == 1000
+
+
+def test_get_group_by_id_and_by_alias(ctx, mobile_store):
+    group = next(g for g in mobile_store.objects("intrusion-set") if len(g.get("aliases", [])) > 1)
+    gid = mobile_store.attack_id(group)
+    alias = next(a for a in group["aliases"] if a != group["name"])
+    by_id = T.get_group(ctx, attack_id=gid)
+    by_alias = T.get_group(ctx, attack_id=alias.upper())
+    assert by_id["id"] == by_alias["id"] == gid and by_alias["matched_by"] == "name_or_alias"
+    assert "error" in T.get_group(ctx, attack_id="Totally Unknown Actor")
+
+
+def test_search_groups_logs_search(ctx, mobile_store):
+    group = next(iter(mobile_store.objects("intrusion-set")))
+    out = T.search_groups(ctx, query=group["name"], k=5)
+    assert group["name"] in {r["name"] for r in out["results"]}
+    assert events(ctx, "search")[-1]["tool"] == "search_groups"
+
+
+def _proposal(source: str, **kw):
+    from mitre_mapper.models import MappingProposal
+
+    return MappingProposal.model_validate(
+        {
+            "domain": "mobile-attack",
+            "techniques": [
+                {
+                    "technique_id": "T1430",
+                    "rationale": "tracks location",
+                    "evidence": [{"source_name": source, "quote": "q"}],
+                }
+            ],
+            **kw,
+        }
+    )
+
+
+def test_preview_lint_passes_spec_to_lint(ctx, tmp_path):
+    """I004 needs ``spec``: a pinned technique shows up as a user-asserted INFO."""
+    from mitre_mapper.allocations import Allocations
+
+    spec = ctx.spec.model_copy(update={"techniques": ["T1404"]})
+    base = _proposal("Test Fixture Reference").model_dump()
+    base["techniques"].append(
+        {"technique_id": "T1404", "rationale": "pinned", "evidence": [], "user_asserted": True}
+    )
+    prop = type(_proposal("x")).model_validate(base)
+    findings = T.preview_lint(spec, prop, ctx.store, Allocations(tmp_path / "a.json"), {}, T.now_stix())
+    assert "I004" in {f.rule_id for f in findings}
+
+
+def test_preview_lint_group_source_outside_pool_reports_instead_of_raising(ctx, tmp_path):
+    from mitre_mapper.allocations import Allocations
+
+    prop = _proposal(
+        "Test Fixture Reference",
+        groups=[{"group_id": "G0142", "quote": "Confucius deployed Pegasus.", "source_name": "Nope"}],
+    )
+    findings = T.preview_lint(
+        ctx.spec, prop, ctx.store, Allocations(tmp_path / "a.json"), {}, T.now_stix()
+    )
+    ids = {f.rule_id for f in findings}
+    assert "E004" in ids and "E011" in ids
+
+
 def test_read_reference_allowlist(ctx, tmp_path, monkeypatch):
     monkeypatch.setattr(T, "REFERENCES_DIR", tmp_path)
     (tmp_path / "linter-rules.md").write_text("rules")

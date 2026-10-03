@@ -31,23 +31,44 @@ Event-field contract (later waves emit to this; fields marked * are read by
                    (``RunLog.open`` recovers header fields from this event)
     intake_invalid errors (list[str])
     domain_resolved* domains (list[str])  -- latest one defines record.domains
-    reference_fetch  source_name, url, ok, chars
-    reference_fetch_failed* source_name, url, error      -- counted
+    reference_fetch  source_name, url, ok (True), chars, content_type, cached (bool;
+                   True = served from the content-addressed cache or frozen evidence dir)
+    reference_fetch_failed* source_name, url, error      -- counted; error is human text
+                   ("no url", "fetch disabled", "not in frozen evidence", "HTTP 403", ...)
     evidence_truncated source_name, original_chars, kept_chars
     search*        tool, query, k, returned_ids (list[str]), call_id
                    -- empty/missing ``returned_ids`` counts as a zero-hit query
     revoked_redirect from_id, to_id
-    tool_call      tool, args, call_id, sha256, ok
-    proposal_draft* domain, attempt, ...  -- attempts[domain] = count of these
-    lint_result*   domain, attempt,
-                   findings: [{rule_id, severity: "ERROR"|"WARN"|"INFO", ...}]
-    judge_verdict* domain, attempt, approved,
-                   items: [{name, passed, ...}]          -- failed names recorded
-    retry          domain, attempt, reason, added, removed (proposal N vs N+1)
-    group_quote_check passed, aliases_matched, source
-    unmatched_actor* actor, quote                          -- counted
-    user_asserted  kind, ...
-    merge, allocation (attack_id, name), mint  -- free-form
+    tool_call      tool, args, call_id, sha256, ok, summary? (tool-specific facts, e.g.
+                   get_evidence: total_chars, offset, returned_chars)
+    proposal_draft* domain, attempt, technique_ids, group_ids, declined, rejected_candidates
+                   -- attempts[domain] = count of these
+    lint_result*   domain, attempt (int, or "final" with phase="final"),
+                   findings: [{rule_id, severity: "ERROR"|"WARN"|"INFO", message, target, details}]
+    judge_verdict* domain, attempt, approved, prompt_sha256,
+                   items: [{name, passed, rationale}]     -- failed names recorded.
+                   An unparseable judge answer is logged as approved=False with the single
+                   failed item ``judge_output_invalid`` (rationale = the parse error).
+                   Judge tokens/latency go through ``RunLog.model_call`` (budget), not here.
+    retry          domain, attempt, reason, added, removed (proposal N vs N+1);
+                   reason is ``lint_errors: E004,...``, ``judge_rejected: <items>``,
+                   ``judge_output_invalid`` or ``no_structured_output: ...``
+    group_quote_check domain, attempt, group_id, passed, reason, source,
+                   software_aliases_matched, group_aliases_matched  -- one per agent-proposed
+                   group mapping per attempt (the E011 check; user-asserted are not checked)
+    unmatched_actor* domain, actor, quote, source_name      -- counted; one per
+                   ``proposal.unmatched_actors`` entry of the accepted proposal
+    user_asserted  kind = "intake" (pinned techniques: domain, techniques) |
+                   "group_ref" (existing group asserted via ``groups[].ref``: domain,
+                   group_id) | "new_group" (``groups[].new``: name, aliases, techniques)
+    merge          kind = "agent_config" (domain, recursion_limit, ...) | "judge_config"
+                   (judge: model name or null = judge skipped, logged once) | "cross_domain"
+                   (domains, n_techniques, n_groups)
+    allocation     attack_id, name, stix_id
+    mint           software_id, n_objects, domains,
+                   techniques: {domain: [{id, name, user_asserted, sources: [source_name]}]},
+                   groups: {domain: [{id, name, user_asserted, kind: "existing"|"new"}]}
+                   -- the final mapping; ``run.md`` "Mapping" is rendered from it
     budget_exhausted message, n_model_calls, tokens, max_model_calls, max_tokens
     provider_error message
     run_end        terminal_state, n_model_calls, tokens {in,out}, latency_s,
@@ -617,6 +638,8 @@ def _render_run_md(record: RunRecord, events: Sequence[Mapping[str, Any]], error
     for ev in events:
         if ev.get("event") == "unmatched_actor":
             lines.append(f"  - {ev.get('actor', '?')}: \"{ev.get('quote', '')}\"")
+    lines += _render_mapping(events)
+    lines += _render_attempts(events)
     msgs = [error] if error else []
     for ev in events:
         if ev.get("event") in ("error", "provider_error", "budget_exhausted") and ev.get("message"):
@@ -626,6 +649,64 @@ def _render_run_md(record: RunRecord, events: Sequence[Mapping[str, Any]], error
     if msgs:
         lines += ["", "## Error", *[f"- {m}" for m in msgs]]
     return "\n".join(lines) + "\n"
+
+
+def _render_mapping(events: Sequence[Mapping[str, Any]]) -> list[str]:
+    """``## Mapping`` from the (last) ``mint`` event: techniques with sources, groups."""
+    mint = next((e for e in reversed(events) if e.get("event") == "mint"), None)
+    if mint is None:
+        return []
+    techniques: Mapping[str, Any] = mint.get("techniques") or {}
+    groups: Mapping[str, Any] = mint.get("groups") or {}
+    lines = ["", "## Mapping"]
+    for domain in sorted(set(techniques) | set(groups)):
+        lines.append(f"### {domain}")
+        for t in techniques.get(domain, []):
+            who = "user-asserted" if t.get("user_asserted") else ", ".join(t.get("sources") or []) or "NO SOURCE"
+            lines.append(f"- {t.get('id')} {t.get('name')} -- {who}")
+        for g in groups.get(domain, []):
+            tags = [str(g.get("kind", "?"))] + (["user-asserted"] if g.get("user_asserted") else [])
+            lines.append(f"- group {g.get('id')} {g.get('name')} ({', '.join(tags)})")
+    return lines
+
+
+def _render_attempts(events: Sequence[Mapping[str, Any]]) -> list[str]:
+    """``## Attempts``: per (domain, attempt) lint ERROR rule ids + judge outcome + quote failures."""
+    rows: dict[tuple[str, int], dict[str, Any]] = {}
+    final_errors: dict[str, list[str]] = {}
+    quote_fails: list[str] = []
+    for ev in events:
+        name = ev.get("event")
+        dom = str(ev.get("domain", "?"))
+        att = ev.get("attempt")
+        if name == "lint_result":
+            errs = sorted(
+                {str(f["rule_id"]) for f in ev.get("findings") or [] if str(f.get("severity", "")).upper() == "ERROR"}
+            )
+            if isinstance(att, int):
+                rows.setdefault((dom, att), {})["lint"] = errs
+            elif errs:
+                final_errors[dom] = errs
+        elif name == "judge_verdict" and isinstance(att, int):
+            failed = [str(i.get("name")) for i in ev.get("items") or [] if i.get("passed") is False]
+            rows.setdefault((dom, att), {})["judge"] = "approved" if ev.get("approved") else failed
+        elif name == "group_quote_check" and ev.get("passed") is False:
+            quote_fails.append(f"  - {dom} #{att} {ev.get('group_id')}: {ev.get('reason')}")
+    if not (rows or final_errors):
+        return []
+    lines = ["", "## Attempts"]
+    for (dom, att), row in sorted(rows.items()):
+        lint = row.get("lint")
+        parts = [f"lint {'ERROR ' + ', '.join(lint) if lint else 'clean'}" if lint is not None else "no lint"]
+        judge = row.get("judge")
+        if judge is not None:
+            parts.append("judge approved" if judge == "approved" else "judge failed " + ", ".join(judge))
+        lines.append(f"- {dom} #{att}: " + "; ".join(parts))
+    for dom, errs in sorted(final_errors.items()):
+        lines.append(f"- {dom} final lint ERROR {', '.join(errs)}")
+    if quote_fails:
+        lines += ["- group quote check failures:", *quote_fails]
+    return lines
 
 
 # --------------------------------------------------------------------------- context

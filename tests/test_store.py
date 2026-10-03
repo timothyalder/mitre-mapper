@@ -111,3 +111,49 @@ def test_enterprise_powershell_revoked_redirect(datasets_dir):
     assert result.redirected_from == "T1086"
     # ids are not unique within a bundle: T1212 is a live technique + deprecated course-of-action
     assert enterprise.lookup("T1212", "attack-pattern").obj["type"] == "attack-pattern"
+
+
+# --- group alias resolution (Wave 3C) -----------------------------------------
+
+
+def test_resolve_group_name_and_alias_case_insensitive(mobile_store):
+    by_name = mobile_store.resolve_group("scattered spider")
+    assert mobile_store.attack_id(by_name) == "G1015"
+    assert mobile_store.attack_id(mobile_store.resolve_group("OCTO TEMPEST")) == "G1015"
+    assert mobile_store.attack_id(mobile_store.resolve_group("  Confucius   APT ")) == "G0142"
+    assert mobile_store.resolve_group("No Such Actor") is None
+
+
+def test_resolve_group_follows_revoked_by(mobile_store):
+    # Stolen Pencil (G0086) is revoked -> Kimsuky (G0094)
+    resolved = mobile_store.resolve_group("Stolen Pencil")
+    assert mobile_store.attack_id(resolved) == "G0094" and not resolved.get("revoked")
+
+
+def test_resolve_group_returns_copy_and_group_names(mobile_store):
+    obj = mobile_store.resolve_group("Confucius")
+    assert mobile_store.group_names(obj) == ["Confucius", "Confucius APT"]
+    obj["name"] = "mutated"
+    assert mobile_store.resolve_group("Confucius")["name"] == "Confucius"
+    assert mobile_store.group_names({"name": "A"}) == ["A"]  # a revoked group may have no aliases
+    assert mobile_store.group_names({"name": "A", "aliases": ["A", "B", "B"]}) == ["A", "B"]
+
+
+@pytest.mark.slow
+def test_enterprise_vendor_aliases_resolve(attack_store):
+    ent = attack_store.domain("enterprise-attack")
+    for alias, expected in [
+        ("CARBON SPIDER", "G0046"),  # FIN7
+        ("Chafer", "G0087"),  # APT39
+        ("IRON LIBERTY", "G0035"),  # Dragonfly
+        ("Octo Tempest", "G1015"),  # Scattered Spider
+    ]:
+        assert ent.attack_id(ent.resolve_group(alias)) == expected, alias
+
+
+@pytest.mark.slow
+def test_enterprise_alias_collision_prefers_name_then_lowest_id(attack_store):
+    ent = attack_store.domain("enterprise-attack")
+    # 'UAC-0056' is an alias of two groups (Ember Bear, Saint Bear); the name match wins elsewhere
+    assert ent.resolve_group("Thrip")["name"] == "Thrip"
+    assert ent.resolve_group("UAC-0056") is not None

@@ -54,8 +54,43 @@ class Allocations:
         section = self._read()[_SECTION[kind]]
         return self._existing(section, stix_id) or self._next_id(kind, section)
 
-    def allocate(self, kind: Kind, stix_id: str, name: str, run_id: str) -> str:
-        """Idempotent per ``stix_id``; persists a new id atomically."""
+    def peek_many(self, kind: Kind, stix_ids: list[str]) -> dict[str, str]:
+        """Like :meth:`peek` for several ids at once: unallocated ids get *consecutive*
+        free ids in the given order (what ``allocate`` would hand out). Never writes."""
+        section = self._read()[_SECTION[kind]]
+        out: dict[str, str] = {}
+        next_n = int(self._next_id(kind, section)[2:])
+        for stix_id in stix_ids:
+            if stix_id in out:
+                continue
+            existing = self._existing(section, stix_id)
+            if existing:
+                out[stix_id] = existing
+            else:
+                out[stix_id] = f"{_PREFIX[kind]}{next_n:04d}"
+                next_n += 1
+        return out
+
+    def record_for(self, kind: Kind, stix_id: str) -> dict[str, Any] | None:
+        """Registry record for ``stix_id`` plus its ``attack_id``, or None."""
+        section = self._read()[_SECTION[kind]]
+        attack_id = self._existing(section, stix_id)
+        return {"attack_id": attack_id, **section[attack_id]} if attack_id else None
+
+    def allocate(
+        self,
+        kind: Kind,
+        stix_id: str,
+        name: str,
+        run_id: str,
+        *,
+        definition_sha256: str | None = None,
+    ) -> str:
+        """Idempotent per ``stix_id``; persists a new id atomically.
+
+        ``definition_sha256`` (user-defined groups) is stored on first allocation only,
+        so W005 can detect a later conflicting definition; absent for software.
+        """
         with self._locked():
             registry = self._read()
             section = registry[_SECTION[kind]]
@@ -68,6 +103,8 @@ class Allocations:
                 "name": name,
                 "first_run": run_id,
             }
+            if definition_sha256:
+                section[attack_id]["definition_sha256"] = definition_sha256
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=self.path.name, suffix=".tmp")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:

@@ -101,3 +101,20 @@ def looping_search_model() -> ScriptedChatModel:
     return ScriptedChatModel(
         loop=lambda: tool_call_msg("search_techniques", {"query": "spyware", "k": 3})
     )
+
+
+def verdict_msg(
+    failing: tuple[str, ...] = (),
+    *,
+    items: list[dict[str, Any]] | None = None,
+    approved: bool | None = None,
+    tokens: tuple[int, int] = (100, 20),
+) -> AIMessage:
+    """Judge response for ``with_structured_output(Verdict)``: a tool call named ``Verdict``."""
+    names = ("evidence_grounding", "technique_specificity", "omission_check", "group_attribution")
+    rows = items if items is not None else [
+        {"name": n, "passed": n not in failing, "rationale": f"{n} rationale"} for n in names
+    ]
+    if approved is None:
+        approved = not failing
+    return tool_call_msg("Verdict", {"approved": approved, "items": rows, "summary": "s"}, tokens=tokens)

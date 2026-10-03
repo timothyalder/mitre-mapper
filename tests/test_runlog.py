@@ -329,3 +329,47 @@ def test_dirty_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(runlog, "_git", fake)
     assert runlog._git_sha() == "abc123-dirty"
     _ = runlog.RunLog  # keep import used
+
+
+def test_run_md_renders_mapping_and_attempts_from_events(tmp_path):
+    log = RunLog.start(
+        tmp_path, software_name="S", intake_text_or_path="x", model="m", judge_model="j", prompt_text="p"
+    )
+    log.event("domain_resolved", domains=["mobile-attack"])
+    for att in (1, 2):
+        log.event("proposal_draft", domain="mobile-attack", attempt=att)
+    log.event(
+        "lint_result", domain="mobile-attack", attempt=1,
+        findings=[{"rule_id": "E004", "severity": "ERROR"}, {"rule_id": "I001", "severity": "INFO"}],
+    )
+    log.event("lint_result", domain="mobile-attack", attempt=2, findings=[])
+    log.event("group_quote_check", domain="mobile-attack", attempt=1, group_id="G0142", passed=False, reason="not verbatim")
+    log.event(
+        "judge_verdict", domain="mobile-attack", attempt=2, approved=False, prompt_sha256="a" * 64,
+        items=[{"name": "omission_check", "passed": False, "rationale": "r"},
+               {"name": "evidence_grounding", "passed": True, "rationale": "r"}],
+    )
+    log.event(
+        "mint", software_id="x", n_objects=3, domains=["mobile-attack"],
+        techniques={"mobile-attack": [
+            {"id": "T1430", "name": "Location Tracking", "user_asserted": False, "sources": ["Rpt A", "Rpt B"]},
+            {"id": "T1404", "name": "Exploit", "user_asserted": True, "sources": ["mitre-mapper intake"]},
+        ]},
+        groups={"mobile-attack": [{"id": "GX0001", "name": "Actor", "user_asserted": True, "kind": "new"}]},
+    )
+    log.finalize("minted")
+    md = (log.run_dir / "run.md").read_text()
+    assert "## Mapping\n### mobile-attack\n- T1430 Location Tracking -- Rpt A, Rpt B" in md
+    assert "- T1404 Exploit -- user-asserted" in md
+    assert "- group GX0001 Actor (new, user-asserted)" in md
+    assert "- mobile-attack #1: lint ERROR E004" in md
+    assert "- mobile-attack #2: lint clean; judge failed omission_check" in md
+    assert "G0142: not verbatim" in md
+    assert len(md.splitlines()) < 40  # stays compact
+
+
+def test_run_md_without_mint_has_no_mapping_section(tmp_path):
+    log = RunLog.start(tmp_path, software_name="S", intake_text_or_path="x", model="m", judge_model=None, prompt_text="p")
+    log.finalize("declined")
+    md = (log.run_dir / "run.md").read_text()
+    assert "## Mapping" not in md and "## Attempts" not in md

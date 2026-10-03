@@ -1,4 +1,4 @@
-"""typer CLI: ``map`` and a minimal Wave 2 ``report``.
+"""typer CLI: ``map``, ``judge`` (replay) and a minimal ``report``.
 
 No LangChain imports at module level: ``map`` imports :mod:`mitre_mapper.run` lazily so
 ``report`` stays instant and acceptance criterion 13 holds.
@@ -33,9 +33,11 @@ class Config:
     runs_dir: Path = Path("runs")
     max_attempts: int = 3
     max_model_calls: int = 60
-    fetch: bool = True  # used from Wave 3A
+    fetch: bool = True
     fetch_timeout: float = 20.0
-    evidence_dir: Path | None = None
+    evidence_dir: Path | None = None  # frozen mode: read evidence only from here
+    use_cache: bool = True
+    cache_dir: Path | None = None  # default: <repo>/.cache/fetch
 
 
 @app.command("map")
@@ -47,6 +49,14 @@ def map_cmd(
     datasets_dir: Annotated[Path, typer.Option()] = Path("datasets"),
     max_attempts: Annotated[int, typer.Option()] = 3,
     max_model_calls: Annotated[int, typer.Option()] = 60,
+    no_fetch: Annotated[bool, typer.Option("--no-fetch", help="Do not fetch references.")] = False,
+    evidence_dir: Annotated[
+        Path | None,
+        typer.Option(help="Frozen evidence dir (<slug(source_name)>.txt); never touches the network."),
+    ] = None,
+    no_cache: Annotated[bool, typer.Option("--no-cache", help="Ignore the fetch cache.")] = False,
+    fetch_timeout: Annotated[float, typer.Option(help="Per-reference fetch timeout (s).")] = 20.0,
+    cache_dir: Annotated[Path | None, typer.Option(help="Fetch cache dir.")] = None,
 ) -> None:
     """Map INTAKE to ATT&CK objects; prints run id, terminal state and run.md path."""
     cfg = Config()
@@ -64,12 +74,51 @@ def map_cmd(
         datasets_dir=datasets_dir,
         max_attempts=max_attempts,
         max_model_calls=max_model_calls,
+        fetch=cfg.fetch and not no_fetch,
+        evidence_dir=evidence_dir or cfg.evidence_dir,
+        use_cache=cfg.use_cache and not no_cache,
+        fetch_timeout=fetch_timeout,
+        cache_dir=cache_dir or cfg.cache_dir,
     )
     typer.echo(f"run_id: {record.run_id}")
     typer.echo(f"terminal_state: {record.terminal_state}")
     typer.echo(f"run.md: {Path(runs_dir) / record.run_id / 'run.md'}")
     if record.terminal_state not in ("minted", "declined"):
         raise typer.Exit(1)
+
+
+@app.command("judge")
+def judge_cmd(
+    run: Annotated[str, typer.Option("--run", help="Run id under --runs-dir.")],
+    domain: Annotated[str, typer.Option(help="Domain, e.g. mobile-attack.")],
+    attempt: Annotated[int, typer.Option(help="Attempt number (proposal_<n>.json).")],
+    model: Annotated[str | None, typer.Option(help="Judge model (env MITRE_MAPPER_JUDGE_MODEL).")] = None,
+    runs_dir: Annotated[Path, typer.Option()] = Path("runs"),
+    evidence_dir: Annotated[Path | None, typer.Option(help="Override <run>/evidence.")] = None,
+) -> None:
+    """Re-run the judge on a recorded proposal; prints per-item results."""
+    chosen = model or Config().judge_model
+    if not chosen:
+        typer.echo("error: pass --model or set MITRE_MAPPER_JUDGE_MODEL", err=True)
+        raise typer.Exit(2)
+    run_dir = Path(runs_dir) / run
+    if not (run_dir / domain / f"proposal_{attempt}.json").is_file():
+        typer.echo(f"error: {run_dir / domain / f'proposal_{attempt}.json'} not found", err=True)
+        raise typer.Exit(2)
+    from mitre_mapper.judge import JudgeOutputError, replay_judge  # lazy: pulls in langchain
+    from mitre_mapper.runlog import ProviderError
+
+    try:
+        res = replay_judge(run_dir, domain, attempt, chosen, evidence_dir=evidence_dir)
+    except (JudgeOutputError, ProviderError) as exc:
+        typer.echo(f"judge failed: {getattr(exc, 'message', None) or exc}", err=True)
+        raise typer.Exit(1) from exc
+    v = res.verdict
+    typer.echo(f"approved: {v.approved}")
+    for item in v.items:
+        typer.echo(f"  [{'PASS' if item.passed else 'FAIL'}] {item.name}: {item.rationale}")
+    typer.echo(f"tokens in/out: {res.tokens_in}/{res.tokens_out}; latency: {res.latency_s:.2f}s")
+    typer.echo(f"prompt_sha256: {res.prompt_sha256}")
 
 
 def build_report(rows: list[RunRecord]) -> dict[str, Any]:

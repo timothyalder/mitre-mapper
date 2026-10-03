@@ -119,9 +119,25 @@ class GroupMapping(BaseModel):
     model_config = _STRICT
 
     group_id: GroupId
-    quote: str
-    source_name: str
+    quote: str = ""
+    source_name: str = ""
     user_asserted: bool = False
+
+    @model_validator(mode="after")
+    def _quote_required_unless_user_asserted(self) -> GroupMapping:
+        if not self.user_asserted and not (self.quote.strip() and self.source_name.strip()):
+            raise ValueError("an agent-proposed group link needs a non-empty quote and source_name")
+        return self
+
+
+class UnmatchedActor(BaseModel):
+    """An actor named in evidence that has no ATT&CK group (logged as ``unmatched_actor``)."""
+
+    model_config = _STRICT
+
+    actor: NonEmptyStr
+    quote: NonEmptyStr
+    source_name: str
 
 
 class MappingProposal(BaseModel):
@@ -136,6 +152,7 @@ class MappingProposal(BaseModel):
     domain: Domain
     techniques: list[TechniqueMapping] = []
     groups: list[GroupMapping] = []
+    unmatched_actors: list[UnmatchedActor] = []
     declined: bool = False
     decline_rationale: str | None = None
 

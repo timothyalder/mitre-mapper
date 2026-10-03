@@ -27,6 +27,10 @@ def is_inactive(obj: dict[str, Any]) -> bool:
     return bool(obj.get("revoked") or obj.get("x_mitre_deprecated"))
 
 
+def _fold(name: str) -> str:
+    return " ".join(name.casefold().split())
+
+
 @dataclass
 class Lookup:
     obj: dict[str, Any] | None
@@ -43,6 +47,7 @@ class DomainStore:
         self.data = MitreAttackData(str(self.bundle_path))
         raw = json.loads(self.bundle_path.read_text(encoding="utf-8"))["objects"]
         self._by_stix: dict[str, dict[str, Any]] = {o["id"]: o for o in raw}
+        self._group_names: dict[str, list[dict[str, Any]]] | None = None
         self._by_attack: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for obj in raw:
             attack_id = self.attack_id(obj)
@@ -90,6 +95,51 @@ class DomainStore:
             if not is_inactive(current):
                 return Lookup(copy.deepcopy(current), redirected_from=attack_id)
         return Lookup(None)
+
+    @staticmethod
+    def group_names(obj: dict[str, Any]) -> list[str]:
+        """Group name followed by its aliases, de-duplicated, order preserved."""
+        seen: dict[str, None] = {}
+        for name in [obj.get("name", ""), *obj.get("aliases", [])]:
+            if name:
+                seen.setdefault(name, None)
+        return list(seen)
+
+    def _groups_by_name(self) -> dict[str, list[dict[str, Any]]]:
+        """Casefolded, whitespace-normalised name/alias -> intrusion-sets (live and dead)."""
+        if self._group_names is None:
+            index: dict[str, list[dict[str, Any]]] = {}
+            for obj in self._by_stix.values():
+                if obj["type"] != "intrusion-set":
+                    continue
+                for name in self.group_names(obj):
+                    index.setdefault(_fold(name), []).append(obj)
+            self._group_names = index
+        return self._group_names
+
+    def resolve_group(self, name: str) -> dict[str, Any] | None:
+        """Active group whose name or alias equals ``name`` (case-insensitive).
+
+        An exact *name* match beats an alias match; remaining ties (real aliases
+        collide, e.g. ``UAC-0056``) go to the lowest ATT&CK id. If only a revoked
+        group matches, its ``revoked-by`` successor is returned. Deprecated groups
+        with no successor are never returned.
+        """
+        matches = self._groups_by_name().get(_fold(name), [])
+
+        def rank(o: dict[str, Any]) -> tuple[bool, str]:
+            return (_fold(o["name"]) != _fold(name), self.attack_id(o) or "")
+
+        live = sorted((o for o in matches if not is_inactive(o)), key=rank)
+        if live:
+            return copy.deepcopy(live[0])
+        for dead in sorted(matches, key=rank):
+            attack_id = self.attack_id(dead)
+            if dead.get("revoked") and attack_id:
+                found = self.lookup(attack_id, "intrusion-set")
+                if found.obj is not None:
+                    return found.obj
+        return None
 
     def software_techniques(self, attack_id: str) -> list[str]:
         """ATT&CK ids of active techniques used by the software, sorted."""
