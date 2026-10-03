@@ -23,3 +23,10 @@ runs/*/*
 
 # allocations registry lock (sidecar; os.replace swaps the json)
 datasets/allocations.json.lock
+
+# Eval frozen evidence: third-party text in a PUBLIC repo is never committed (PLAN D17; the lock
+# evals/fixtures/<case>/evidence.lock.json is). Recreate with `mitre-mapper eval freeze`.
+evals/fixtures/*/evidence/*
+# ...except US-government works, locked as license "public-domain-us-gov" (exactly these files).
+!evals/fixtures/crackmapexec/evidence/us-cert-ta18-074a.txt
+!evals/fixtures/crackmapexec/evidence/cisa-gru29155-2024.txt

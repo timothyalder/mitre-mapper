@@ -12,11 +12,14 @@ from __future__ import annotations
 import copy
 import json
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from mitreattack.stix20 import MitreAttackData
+
+from mitre_mapper.holdout import HoldoutReport, HoldoutSpec, apply_holdout
 
 _ATTACK_SOURCE = re.compile(r"^mitre-.*attack$")
 _MAX_REDIRECTS = 5
@@ -41,11 +44,21 @@ class Lookup:
 class DomainStore:
     """One ATT&CK domain bundle."""
 
-    def __init__(self, domain: str, bundle_path: Path) -> None:
+    def __init__(self, domain: str, bundle_path: Path, holdout: HoldoutSpec | None = None) -> None:
         self.domain = domain
         self.bundle_path = Path(bundle_path)
-        self.data = MitreAttackData(str(self.bundle_path))
-        raw = json.loads(self.bundle_path.read_text(encoding="utf-8"))["objects"]
+        self.holdout = holdout
+        self.holdout_report: HoldoutReport | None = None
+        bundle = json.loads(self.bundle_path.read_text(encoding="utf-8"))
+        raw = bundle["objects"]
+        if holdout is None:
+            self.data = MitreAttackData(str(self.bundle_path))
+        else:  # eval: hide the answer before anything (incl. MitreAttackData) can see it
+            raw, self.holdout_report = apply_holdout(raw, holdout, domain)
+            with tempfile.TemporaryDirectory() as tmp:
+                held = Path(tmp) / self.bundle_path.name
+                held.write_text(json.dumps({**bundle, "objects": raw}), encoding="utf-8")
+                self.data = MitreAttackData(str(held))
         self._by_stix: dict[str, dict[str, Any]] = {o["id"]: o for o in raw}
         self._group_names: dict[str, list[dict[str, Any]]] | None = None
         self._by_attack: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -53,6 +66,12 @@ class DomainStore:
             attack_id = self.attack_id(obj)
             if attack_id:
                 self._by_attack.setdefault((obj["type"], attack_id), []).append(obj)
+
+    @property
+    def cache_key(self) -> str:
+        """Identity for per-bundle caches: the bundle path plus the holdout, if any."""
+        base = str(self.bundle_path.resolve())
+        return base if self.holdout is None else f"{base}#holdout={self.holdout.name}"
 
     @staticmethod
     def attack_id(obj: dict[str, Any]) -> str | None:
@@ -157,9 +176,9 @@ class DomainStore:
 
 
 class AttackStore:
-    """Lazy, cached per-domain stores. ``holdout`` is reserved for Wave 5."""
+    """Lazy, cached per-domain stores. ``holdout`` (PLAN 4.2) hides eval answers at load time."""
 
-    def __init__(self, datasets_dir: Path, holdout: Any = None) -> None:
+    def __init__(self, datasets_dir: Path, holdout: HoldoutSpec | None = None) -> None:
         self.datasets_dir = Path(datasets_dir)
         self.holdout = holdout
         self._domains: dict[str, DomainStore] = {}
@@ -169,16 +188,20 @@ class AttackStore:
             path = self.datasets_dir / f"{domain}.json"
             if not path.exists():
                 raise FileNotFoundError(f"no dataset for domain {domain!r}: {path}")
-            self._domains[domain] = DomainStore(domain, path)
+            self._domains[domain] = DomainStore(domain, path, self.holdout)
         return self._domains[domain]
 
 
-_STORES: dict[Path, AttackStore] = {}
+_STORES: dict[tuple[Path, HoldoutSpec | None], AttackStore] = {}
 
 
-def get_store(datasets_dir: Path) -> AttackStore:
-    """Process-wide cache of :class:`AttackStore` per datasets directory."""
-    key = Path(datasets_dir).resolve()
+def get_store(datasets_dir: Path, holdout: HoldoutSpec | None = None) -> AttackStore:
+    """Process-wide cache of :class:`AttackStore` per (datasets directory, holdout).
+
+    A held-out store is cached separately from the plain one, so an eval can score against
+    the latter while the agent only ever sees the former.
+    """
+    key = (Path(datasets_dir).resolve(), holdout)
     if key not in _STORES:
-        _STORES[key] = AttackStore(key)
+        _STORES[key] = AttackStore(key[0], holdout)
     return _STORES[key]

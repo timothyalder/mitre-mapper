@@ -174,7 +174,8 @@ def _do_search(ctx: ToolContext, call: _Call, kind: str, query: str, k: int) -> 
         results.append(row)
     ids = [h.attack_id for h in hits]
     ctx.returned_ids.extend(ids)
-    call.emit("search", tool=f"search_{kind}s", query=query, k=k, returned_ids=ids)
+    tool = "search_software" if kind == "software" else f"search_{kind}s"
+    call.emit("search", tool=tool, domain=ctx.domain, query=query, k=k, returned_ids=ids)
     return {"domain": ctx.domain, "query": query, "results": results}
 
 

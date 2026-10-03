@@ -1,0 +1,52 @@
+# Eval case (PLAN section 4). The gold lists below are a HUMAN-READABLE copy: scoring always
+# re-derives gold from the live, non-held-out store, and tests/test_evals.py asserts the two agree.
+# If they disagree the dataset moved; investigate, do not silently ignore.
+case_name: crackmapexec
+description: >
+  CrackMapExec (S0488) for group links. Holdout hides S0488, its relationships and masks the 4
+  group->technique relationships that name it (Dragonfly T1110.002/T1588.002, APT39 T1046/T1135).
+intake: evals/fixtures/crackmapexec/intake.md
+intake_status: draft  # written by Claude; rewrite in your own words
+domain: enterprise-attack
+attack_id: S0488
+holdout: crackmapexec
+twin_baseline_id: S0165   # OSInfo: P 0.60 R 0.30 F1 0.40, Jaccard 0.25 (verified; closest by Jaccard)
+# Groups for which a frozen source names CrackMapExec within 1500 chars of a group name/alias, i.e. a
+# verbatim quote can satisfy E011 (tests/test_evals.py recomputes this from the evidence when present):
+#   G0035 Dragonfly   Secureworks IRON LIBERTY (176 chars apart), US-CERT TA18-074A
+#   G0046 FIN7        CrowdStrike CARBON SPIDER (216)
+#   G0069 MuddyWater  Symantec Seedworm (26)
+# No usable evidence: G0087 APT39 (FireEye archive and BitDefender Chafer never name the tool) and
+# G1003 Ember Bear (CISA AA24-249A names the actor ~9.8k chars from its CrackMapExec mention).
+# The TrendMicro POWERSTATS reference timed out at freeze time.
+groups_with_evidence:
+  - G0035
+  - G0046
+  - G0069
+gold_technique_ids:
+  - T1003.002
+  - T1003.003
+  - T1003.004
+  - T1016
+  - T1018
+  - T1047
+  - T1049
+  - T1053.002
+  - T1059.001
+  - T1069.002
+  - T1083
+  - T1087.002
+  - T1110
+  - T1110.001
+  - T1110.003
+  - T1112
+  - T1135
+  - T1201
+  - T1550.002
+  - T1680
+gold_group_ids:
+  - G0035  # Dragonfly
+  - G0046  # FIN7
+  - G0069  # MuddyWater
+  - G0087  # APT39
+  - G1003  # Ember Bear

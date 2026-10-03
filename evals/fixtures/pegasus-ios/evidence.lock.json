@@ -1,0 +1,32 @@
+[
+  {
+    "source_name": "PegasusCitizenLab",
+    "url": "https://citizenlab.ca/2016/08/million-dollar-dissident-iphone-zero-day-nso-group-uae/",
+    "sha256": "dbdd3657e48c5b43efbebeab27632fab18b4b8fd219074097fa3f5bd39cc9a1c",
+    "chars": 48638,
+    "fetched_at": "2026-10-03T12:32:12Z",
+    "ok": true,
+    "error": null,
+    "license": "not-redistributed"
+  },
+  {
+    "source_name": "Lookout-Pegasus",
+    "url": "https://info.lookout.com/rs/051-ESQ-475/images/lookout-pegasus-technical-analysis.pdf",
+    "sha256": "c3684fd3eb23639d743c84b3beeaf0f684e2c7a1f26786078fe7339a583d52ce",
+    "chars": 42358,
+    "fetched_at": "2026-10-03T12:32:13Z",
+    "ok": true,
+    "error": null,
+    "license": "not-redistributed"
+  },
+  {
+    "source_name": "Pegasus for iOS",
+    "url": null,
+    "sha256": null,
+    "chars": 0,
+    "fetched_at": "2026-10-03T12:32:13Z",
+    "ok": false,
+    "error": "no url",
+    "license": "not-redistributed"
+  }
+]

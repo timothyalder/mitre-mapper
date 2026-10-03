@@ -273,7 +273,7 @@ def _profile_key(obj: dict[str, Any]) -> str | None:
 
 def domain_baseline(store: DomainStore) -> Baseline:
     """Field profiles (E006) and medians (I001-I003) from the real, active objects."""
-    key = str(store.bundle_path.resolve())
+    key = store.cache_key  # a held-out store must not share (or poison) the plain store's baseline
     if key in _BASELINES:
         return _BASELINES[key]
 

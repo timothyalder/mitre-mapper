@@ -1,0 +1,33 @@
+# Eval case (PLAN section 4). The gold lists below are a HUMAN-READABLE copy: scoring always
+# re-derives gold from the live, non-held-out store, and tests/test_evals.py asserts the two agree.
+# If they disagree the dataset moved; investigate, do not silently ignore.
+case_name: pegasus-ios-thin
+description: >
+  Same subject and gold as pegasus-ios, but the intake is only ATT&CK's own S0289 description with its
+  links, URLs and citation markers stripped, and there are no references. The rich-vs-thin gap measures
+  what evidence contributes.
+intake: evals/fixtures/pegasus-ios-thin/intake.md
+intake_status: attack-description
+domain: mobile-attack
+attack_id: S0289
+holdout: pegasus
+twin_baseline_id: S0316
+thin_of: pegasus-ios
+groups_with_evidence: []
+gold_technique_ids:
+  - T1636.002
+  - T1421
+  - T1644
+  - T1456
+  - T1404
+  - T1645
+  - T1426
+  - T1636.003
+  - T1636.004
+  - T1660
+  - T1430
+  - T1664
+  - T1409
+  - T1429
+  - T1658
+gold_group_ids: []

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -516,6 +516,27 @@ def complete_mapping(
         techniques=mint_techniques,
         groups=mint_groups,
     )
+
+
+# --------------------------------------------------------------------------- eval scoring hook
+
+
+@dataclass
+class ScoringInput:
+    """What an eval scorer sees just before the run is finalized (``run.map_software``)."""
+
+    state: str  # the terminal state about to be written
+    error: str | None
+    spec: IntakeSpec
+    evidence: dict[str, str]
+    domains: list[str]
+    outcome: MappingOutcome | None = None  # set when complete_mapping ran (minted / declined / lint_failed)
+    proposals: dict[str, MappingProposal] = field(default_factory=dict)  # agent proposals accepted per domain
+
+
+# Returns the ``eval_scores`` dict for the index row (and may write ``scores.json``); never raises
+# into the run: a failing scorer is logged as an ``error`` event and the run still finalizes.
+EvalScorer = Callable[[RunLog, ScoringInput], "dict[str, Any] | None"]
 
 
 # --------------------------------------------------------------------------- MCP session

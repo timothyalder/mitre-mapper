@@ -157,3 +157,26 @@ def test_enterprise_alias_collision_prefers_name_then_lowest_id(attack_store):
     # 'UAC-0056' is an alias of two groups (Ember Bear, Saint Bear); the name match wins elsewhere
     assert ent.resolve_group("Thrip")["name"] == "Thrip"
     assert ent.resolve_group("UAC-0056") is not None
+
+
+def test_attack_store_applies_a_holdout_at_load_and_caches_it_separately(datasets_dir):
+    from mitre_mapper.holdout import PEGASUS
+    from mitre_mapper.store import AttackStore, get_store
+
+    held = AttackStore(datasets_dir, holdout=PEGASUS)
+    assert held.holdout is PEGASUS and held.domain("mobile-attack").holdout_report is not None
+    assert held.domain("mobile-attack").lookup("S0289", "malware").obj is None
+    assert get_store(datasets_dir) is not get_store(datasets_dir, PEGASUS)
+    assert get_store(datasets_dir, PEGASUS) is get_store(datasets_dir, PEGASUS)
+    assert get_store(datasets_dir).domain("mobile-attack").holdout_report is None
+
+
+def test_held_out_store_has_its_own_cache_key(datasets_dir):
+    from mitre_mapper.holdout import PEGASUS
+
+    plain = get_store(datasets_dir).domain("mobile-attack")
+    held = get_store(datasets_dir, PEGASUS).domain("mobile-attack")
+    assert plain.cache_key != held.cache_key and held.cache_key.endswith("#holdout=pegasus")
+    from mitre_mapper.lint import domain_baseline
+
+    assert domain_baseline(held) is not domain_baseline(plain)  # the lint baseline is not shared either

@@ -64,7 +64,7 @@ log event defined inside `agent.py` is a bug.
 | D14 | **Use mitreattack-python** (`>=6.2.1`). Construct objects with mitreattack-python classes where the type exists there; otherwise `stix2.v20` classes with `allow_custom=True` (mitreattack-python's own dependency). **Never hand-roll STIX dicts.** Query through `MitreAttackData`. |
 | D15 | **Groups are in scope.** The agent may link to **existing** ATT&CK groups only, with verbatim quoted evidence. **New groups are minted only when user-defined in the intake frontmatter** — never formed or minted agentically. |
 | D16 | **Intake is markdown + YAML frontmatter** (§3.1). |
-| D17 | **Eval evidence is frozen** — committed fixtures, no network during `eval`. Live fetching stays on for `map`. |
+| D17 | **Eval evidence is frozen** — no network during `eval`. Live fetching stays on for `map`. The repo is public, so evidence **text is gitignored**; only `evals/fixtures/<case>/evidence.lock.json` (url, sha256, chars, license) is committed, and `mitre-mapper eval freeze` fetches once and verifies hashes. US-government works (CISA) may be committed. |
 | D18 | **ATT&CK IDs are allocated sequentially from a committed global registry** (`datasets/allocations.json`); deltas will be combined. |
 | D19 | Datasets are **pinned to a specific ATT&CK release** in `MANIFEST.json`. |
 | D20 | Runs have a **budget** and always terminate with a logged `run_end`. |

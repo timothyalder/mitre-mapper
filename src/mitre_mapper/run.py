@@ -37,6 +37,9 @@ from mitre_mapper.session import (  # the shared core (also driven by the MCP se
     DEFAULT_CACHE_DIR,
     DEFAULT_SKILL_PATH,
     LINT_FAILED_ATTEMPTS,
+    EvalScorer,
+    MappingOutcome,
+    ScoringInput,
     complete_mapping,
     gather_intake_evidence,
     load_system_prompt,
@@ -46,6 +49,7 @@ from mitre_mapper.session import (  # the shared core (also driven by the MCP se
     render_pinned,
     render_retry_message,
 )
+from mitre_mapper.holdout import HoldoutSpec
 from mitre_mapper.store import AttackStore, get_store
 from mitre_mapper.tools import ToolContext, now_stix
 
@@ -234,11 +238,19 @@ def map_software(
     use_cache: bool = True,
     fetch_timeout: float = 20.0,
     cache_dir: Path | str | None = None,
+    holdout: HoldoutSpec | None = None,
+    eval_case: str | None = None,
+    eval_scorer: EvalScorer | None = None,
 ) -> RunRecord:
     """Map one intake file to a delta. Always returns the finalized ``RunRecord``.
 
     ``judge_model=None`` skips the judge (logged once as ``merge``/``judge_config``).
     ``evidence_dir`` is frozen mode: evidence is read only from there, never the network.
+
+    Eval mode (PLAN 4): ``holdout`` hides the answer from the store (the diff is logged as a
+    ``merge`` kind=holdout event), ``eval_case`` lands on the run_start event and index row, and
+    ``eval_scorer`` is called just before finalization (also on budget/provider failures) so its
+    scores land on the index row. An eval run is otherwise an ordinary run.
     """
     intake_path = Path(intake_path)
     datasets_dir = Path(datasets_dir)
@@ -263,6 +275,7 @@ def map_software(
         model=_model_name(model),
         judge_model=_model_name(judge_model) if judge_model is not None else None,
         prompt_text=system_prompt,
+        eval_case=eval_case,
         budget=budget,
         manifest_path=datasets_dir / "MANIFEST.json",
     ) as log:
@@ -272,58 +285,94 @@ def map_software(
             return _record(runs_dir, log)
 
         domains: list[str] = list(resolve_domains(spec))
-        log.event("domain_resolved", domains=domains)
-        evidence = gather_intake_evidence(
-            log,
-            spec,
-            cache_dir=Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR,
-            evidence_dir=Path(evidence_dir) if evidence_dir else None,
-            fetch=fetch,
-            use_cache=use_cache,
-            timeout=fetch_timeout,
-        )
-        log.event(
-            "merge",
-            kind="judge_config",
-            judge=_model_name(judge_model) if judge_model is not None else None,
-            note=None if judge_model is not None else "no judge model configured; judge skipped",
-        )
-        store = get_store(datasets_dir)
-        allocations = Allocations(allocations_path)
-        created = now_stix()
-
         accepted: dict[str, MappingProposal] = {}
-        failed_state: str | None = None
-        for domain in domains:
-            ctx = ToolContext(
-                log=log, store=store, domain=domain, spec=spec, evidence=evidence, allocations=allocations
+        evidence: dict[str, str] = {}
+        outcome: MappingOutcome | None = None
+
+        def finish(state: str, error: str | None) -> None:
+            """Finalize, first letting the eval scorer (if any) compute scores. Never loses run_end."""
+            scores: dict[str, Any] | None = None
+            if eval_scorer is not None:
+                try:
+                    scores = eval_scorer(
+                        log,
+                        ScoringInput(
+                            state=state, error=error, spec=spec, evidence=evidence, domains=domains,
+                            outcome=outcome, proposals=dict(accepted),
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001 - a scorer bug must not lose the run
+                    log.event("error", type=type(exc).__name__, message=f"eval scorer failed: {exc}")
+            log.finalize(state, error=error, eval_scores=scores)
+
+        try:
+            log.event("domain_resolved", domains=domains)
+            evidence.update(
+                gather_intake_evidence(
+                    log,
+                    spec,
+                    cache_dir=Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR,
+                    evidence_dir=Path(evidence_dir) if evidence_dir else None,
+                    fetch=fetch,
+                    use_cache=use_cache,
+                    timeout=fetch_timeout,
+                )
             )
-            agent = build_agent(model, ctx, system_prompt)
-            outcome, proposal = _attempt_domain(
-                log=log, ctx=ctx, agent=agent, spec=spec, store=store, allocations=allocations,
-                domain=domain, max_attempts=max_attempts, created=created, judge_model=judge_model,
+            log.event(
+                "merge",
+                kind="judge_config",
+                judge=_model_name(judge_model) if judge_model is not None else None,
+                note=None if judge_model is not None else "no judge model configured; judge skipped",
             )
-            if outcome in ("accepted", "declined") and proposal is not None:
-                accepted[domain] = proposal  # a declined one is kept only if user-asserted items revive it
-                log_unmatched_actors(log, domain, proposal)
+            store = get_store(datasets_dir, holdout)
+            if holdout is not None:
+                for domain in domains:  # the diff the agent is blind to, logged for the improvement loop
+                    report = store.domain(domain).holdout_report
+                    if report is not None:
+                        log.event("merge", kind="holdout", **report.to_event())
+            allocations = Allocations(allocations_path)
+            created = now_stix()
+
+            failed_state: str | None = None
+            for domain in domains:
+                ctx = ToolContext(
+                    log=log, store=store, domain=domain, spec=spec, evidence=evidence, allocations=allocations
+                )
+                agent = build_agent(model, ctx, system_prompt)
+                dom_outcome, proposal = _attempt_domain(
+                    log=log, ctx=ctx, agent=agent, spec=spec, store=store, allocations=allocations,
+                    domain=domain, max_attempts=max_attempts, created=created, judge_model=judge_model,
+                )
+                if dom_outcome in ("accepted", "declined") and proposal is not None:
+                    accepted[domain] = proposal  # a declined one is kept only if user-asserted items revive it
+                    log_unmatched_actors(log, domain, proposal)
+                else:
+                    failed_state = dom_outcome
+                    break
+
+            if failed_state is not None:
+                finish(
+                    failed_state,
+                    LINT_FAILED_ATTEMPTS
+                    if failed_state == "lint_failed"
+                    else "attempts exhausted; the judge rejected the last lint-clean proposal",
+                )
+                return _record(runs_dir, log)
+
+            outcome = complete_mapping(
+                log, spec=spec, store=store, allocations=allocations, evidence=evidence, domains=domains,
+                accepted=accepted, created=created, datasets_dir=datasets_dir,
+            )
+            finish(outcome.state, outcome.error)
+        except (BudgetExhausted, ProviderError) as exc:
+            if eval_scorer is None or log.finalized:
+                raise  # run_context logs and finalizes exactly as for any run
+            if isinstance(exc, BudgetExhausted):
+                log.event("budget_exhausted", message=str(exc), **log.budget.snapshot())
+                finish("budget_exhausted", str(exc))
             else:
-                failed_state = outcome
-                break
-
-        if failed_state is not None:
-            log.finalize(
-                failed_state,
-                error=LINT_FAILED_ATTEMPTS
-                if failed_state == "lint_failed"
-                else "attempts exhausted; the judge rejected the last lint-clean proposal",
-            )
-            return _record(runs_dir, log)
-
-        outcome = complete_mapping(
-            log, spec=spec, store=store, allocations=allocations, evidence=evidence, domains=domains,
-            accepted=accepted, created=created, datasets_dir=datasets_dir,
-        )
-        log.finalize(outcome.state, error=outcome.error)
+                log.event("provider_error", message=exc.message)
+                finish("provider_error", exc.message)
     # Reached normally, or after run_context swallowed BudgetExhausted/ProviderError
     # (it has already finalized the run); other exceptions propagate.
     return _record(runs_dir, log)

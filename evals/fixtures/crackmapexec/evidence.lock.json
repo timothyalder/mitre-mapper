@@ -1,0 +1,92 @@
+[
+  {
+    "source_name": "CME Github September 2018",
+    "url": "https://github.com/byt3bl33d3r/CrackMapExec/wiki/SMB-Command-Reference",
+    "sha256": "bef0756c1c0a9bd85444accee869d92f47f21eadbf586dc2b3a3f176942ddf53",
+    "chars": 12440,
+    "fetched_at": "2026-10-03T12:31:27Z",
+    "ok": true,
+    "error": null,
+    "license": "not-redistributed"
+  },
+  {
+    "source_name": "Secureworks IRON LIBERTY July 2019",
+    "url": "https://www.secureworks.com/research/resurgent-iron-liberty-targeting-energy-sector",
+    "sha256": "b0c399832337db3b9617e45576221220cc00f40ddcc0207ffa4864e5d863abce",
+    "chars": 15375,
+    "fetched_at": "2026-10-03T12:34:53Z",
+    "ok": true,
+    "error": null,
+    "license": "not-redistributed"
+  },
+  {
+    "source_name": "US-CERT TA18-074A",
+    "url": "https://www.us-cert.gov/ncas/alerts/TA18-074A",
+    "sha256": "464e80835e2ea15396c00f2f9cdf1132608069613e6f39f0e1591b34517ff08b",
+    "chars": 45012,
+    "fetched_at": "2026-10-03T12:31:30Z",
+    "ok": true,
+    "error": null,
+    "license": "public-domain-us-gov"
+  },
+  {
+    "source_name": "TrendMicro POWERSTATS V3 June 2019",
+    "url": "https://blog.trendmicro.com/trendlabs-security-intelligence/muddywater-resurfaces-uses-multi-stage-backdoor-powerstats-v3-and-new-post-exploitation-tools/",
+    "sha256": null,
+    "chars": 0,
+    "fetched_at": "2026-10-03T12:35:54Z",
+    "ok": false,
+    "error": "ReadTimeout: The read operation timed out",
+    "license": "not-redistributed"
+  },
+  {
+    "source_name": "Symantec MuddyWater Dec 2018",
+    "url": "https://www.symantec.com/blogs/threat-intelligence/seedworm-espionage-group",
+    "sha256": "c339f3857096d4d8f6ddacd2fd5da21cf5f3317b9f3e9d562717999d6f7c1c76",
+    "chars": 8860,
+    "fetched_at": "2026-10-03T12:32:03Z",
+    "ok": true,
+    "error": null,
+    "license": "not-redistributed"
+  },
+  {
+    "source_name": "CrowdStrike Carbon Spider August 2021",
+    "url": "https://www.crowdstrike.com/blog/carbon-spider-embraces-big-game-hunting-part-1/",
+    "sha256": "845f1dbf67d45b22c315224ddfe6ecff177051de6ffc6bfc003ca05a24ac5514",
+    "chars": 11868,
+    "fetched_at": "2026-10-03T12:32:04Z",
+    "ok": true,
+    "error": null,
+    "license": "not-redistributed"
+  },
+  {
+    "source_name": "FireEye APT39 Jan 2019",
+    "url": "https://web.archive.org/web/2019/https://www.fireeye.com/blog/threat-research/2019/01/apt39-iranian-cyber-espionage-group-focused-on-personal-information.html",
+    "sha256": "8002e3a733ea38b668000b1930026bb297ce28957bccd311a7010ece31f21e08",
+    "chars": 6364,
+    "fetched_at": "2026-10-03T12:34:39Z",
+    "ok": true,
+    "error": null,
+    "license": "not-redistributed"
+  },
+  {
+    "source_name": "BitDefender Chafer May 2020",
+    "url": "https://www.bitdefender.com/blog/labs/iranian-chafer-apt-targeted-air-transportation-and-government-in-kuwait-and-saudi-arabia/",
+    "sha256": "2d61397fe797750c81ec0f1e14626664e732267b63767a0acf9593983d8b0300",
+    "chars": 1368,
+    "fetched_at": "2026-10-03T12:32:07Z",
+    "ok": true,
+    "error": null,
+    "license": "not-redistributed"
+  },
+  {
+    "source_name": "CISA GRU29155 2024",
+    "url": "https://www.cisa.gov/sites/default/files/2024-09/aa24-249a-russian-military-cyber-actors-target-us-and-global-critical-infrastructure.pdf",
+    "sha256": "4fdad4fa9f26ebbf6169f62b77389d969322c9abe2022e4c71b8ee32bb1ec73f",
+    "chars": 66643,
+    "fetched_at": "2026-10-03T12:32:10Z",
+    "ok": true,
+    "error": null,
+    "license": "public-domain-us-gov"
+  }
+]

@@ -36,7 +36,7 @@ Event-field contract (later waves emit to this; fields marked * are read by
     reference_fetch_failed* source_name, url, error      -- counted; error is human text
                    ("no url", "fetch disabled", "not in frozen evidence", "HTTP 403", ...)
     evidence_truncated source_name, original_chars, kept_chars
-    search*        tool, query, k, returned_ids (list[str]), call_id
+    search*        tool, domain, query, k, returned_ids (list[str]), call_id
                    -- empty/missing ``returned_ids`` counts as a zero-hit query
     revoked_redirect from_id, to_id
     tool_call      tool, args, call_id, sha256, ok, summary? (tool-specific facts, e.g.
@@ -66,6 +66,7 @@ Event-field contract (later waves emit to this; fields marked * are read by
                    (domains, n_techniques, n_groups)
                    | "dedupe_user_asserted" (domain, technique_ids, group_ids: agent-proposed
                    items dropped because the user asserted the same technique/group)
+                   | "holdout" (eval runs: objects removed by type, masked relationship ids)
     allocation     attack_id, name, stix_id
     mint           software_id, n_objects, domains,
                    techniques: {domain: [{id, name, user_asserted, sources: [source_name]}]},
