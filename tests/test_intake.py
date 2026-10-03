@@ -98,3 +98,14 @@ def test_intake_reference_names_file(tmp_path):
     ref = intake_reference(spec, tmp_path / "pegasus-ios.md")
     assert ref.source_name == INTAKE_SOURCE == "mitre-mapper intake"
     assert "pegasus-ios.md" in ref.description
+
+
+def test_enterprise_intake_requires_platforms(tmp_path):
+    path = tmp_path / "x.md"
+    path.write_text("---\nname: Some Tool\ntype: tool\n---\nProse.\n")
+    with pytest.raises(IntakeError) as exc:
+        parse_intake(path)
+    assert any(e.startswith("platforms:") for e in exc.value.errors)
+
+    path.write_text("---\nname: Some Tool\ntype: tool\nplatforms: [Windows]\n---\nProse.\n")
+    assert parse_intake(path).platforms == ["Windows"]

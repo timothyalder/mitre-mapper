@@ -46,11 +46,16 @@ def parse_intake(path: Path) -> IntakeSpec:
     if "body" in post.metadata:
         raise IntakeError(["'body' is not a frontmatter field; write prose below the frontmatter"])
     try:
-        return IntakeSpec.model_validate({**post.metadata, "body": post.content.strip()})
+        spec = IntakeSpec.model_validate({**post.metadata, "body": post.content.strip()})
     except ValidationError as exc:
         raise IntakeError(
             [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
         ) from exc
+    # 97% of real enterprise malware carries x_mitre_platforms, so E006 would fail every
+    # attempt and the agent cannot fix it. Fail here instead, before any model call.
+    if "enterprise-attack" in resolve_domains(spec) and not spec.platforms:
+        raise IntakeError(["platforms: required when the software maps to enterprise-attack"])
+    return spec
 
 
 def resolve_domains(spec: IntakeSpec) -> list[Domain]:

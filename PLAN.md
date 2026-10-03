@@ -222,6 +222,8 @@ Free-text intake prose (becomes the description input).
 ```
 
 - Validate with pydantic **before any model call**; an invalid file fails fast with a logged `intake_invalid`.
+  `platforms` is **required when the software maps to enterprise-attack** (E006: 97% of enterprise malware
+  carries `x_mitre_platforms`, and the agent cannot fix a missing value).
 - **User-asserted items** (pinned techniques, `groups[].ref`, `groups[].new`, new-group `techniques`) are
   always included, cited to the intake file (a `mitre-mapper intake` external reference), flagged
   `user_asserted: true` in the proposal and log, **never sent to the judge**, linted only as INFO (I004), and
